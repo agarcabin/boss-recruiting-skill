@@ -79,8 +79,9 @@ class SkillUpdateTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('local-only ' + name, encoding='utf-8')
             preserved[path] = path.read_bytes()
-        with patch.object(updater, 'fetch', side_effect=self.fetch):
+        with patch.object(updater, 'fetch', side_effect=self.fetch), patch.object(updater, 'github_cli') as cli:
             result = updater.update(self.local, self.base / 'backups', self.db)
+        cli.assert_not_called()
         self.assertEqual(result['state'], 'updated')
         self.assertEqual(updater.installed_version(self.local), '1.01')
         self.assertEqual(updater.installed_version(Path(result['backup'])), '1.0.0')

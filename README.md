@@ -4,9 +4,11 @@
 
 ## 安装与更新
 
-从本仓库正式Release下载boss-recruiting-<版本>.zip并解压到本机Codex skills目录中的boss-recruiting文件夹。私有仓库需要有权访问的GitHub账号。本包使用Windows UI Automation；执行脚本需要本机Python 3.12以上或已配置的便携运行环境，现有业务脚本还使用Pillow、openpyxl、PyYAML及简历OCR所需依赖。
+从本仓库正式Release下载boss-recruiting-<版本>.zip并解压到本机Codex skills目录中的boss-recruiting文件夹。当前仓库公开，可以直接下载。本包使用Windows UI Automation；执行脚本需要本机Python 3.12以上或已配置的便携运行环境，现有业务脚本还使用Pillow、openpyxl、PyYAML及简历OCR所需依赖。
 
-启动Skill后，首页第4项“更新项目”检查GitHub Release；有新版本时自动下载、校验、备份并安装。私有仓库更新需先安装GitHub CLI并完成gh auth login。
+启动Skill后，首页第4项“更新项目”检查GitHub Release；有新版本时自动下载、校验、备份并安装。当前公开更新源无需GitHub账号、登录或GitHub CLI。
+
+旧版1.0.0使用私有源配置；已有GitHub登录的用户可直接选择第4项更新。尚未配置GitHub CLI的旧版用户，可先下载1.01及以上版本覆盖Skill通用文件，保留本地profiles和runtime，之后即可匿名更新。
 
 ```text
 python scripts/skill_update.py check

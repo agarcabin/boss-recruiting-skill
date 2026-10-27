@@ -10,7 +10,7 @@
 runtime/win-x64/python/python.exe scripts/skill_update.py update
 ```
 
-没有便携Python时使用本机Python 3.12及以上。私有仓库需要本机GitHub CLI及有效登录；无法访问时说明具体错误，保留当前安装，不要求用户把令牌贴到聊天中。
+没有便携Python时使用本机Python 3.12及以上。当前仓库公开，update-source.json中private=false，直接通过HTTPS检查与下载，无需GitHub账号、登录或GitHub CLI。只有另行配置私有源时才需要本机GitHub CLI及有效登录；无法访问时说明具体错误，保留当前安装，不要求用户把令牌贴到聊天中。
 
 - up_to_date：显示当前与远端版本，无需下载；不降级。
 - no_release：显示该仓库尚无可访问正式版本。
@@ -29,7 +29,7 @@ runtime/win-x64/python/python.exe scripts/skill_update.py update
 
 ## 发布新版本
 
-当前正式发布基线为1.0.0；后续沿用每次+0.01的约定，1.0.0按1.00计算，下一版1.01，再下一版1.02。更新器同时支持三段式版本及两位小数版本，比较时1.10对应1.1.0。
+正式发布基线为1.0.0；后续沿用每次+0.01的约定，1.0.0按1.00计算，随后1.01、1.02。当前版本见SKILL.md；更新器同时支持三段式版本及两位小数版本，比较时1.10对应1.1.0。
 
 完成修改和验证后同步版本与日志，再构建附件：
 
