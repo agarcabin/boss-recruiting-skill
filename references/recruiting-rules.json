@@ -1,0 +1,71 @@
+{
+  "version": 3,
+  "worker_advantage": [
+    "组装",
+    "进厂",
+    "电子厂",
+    "做过组装",
+    "电子厂工作经验",
+    "进过厂",
+    "流水线经验",
+    "熟悉包装",
+    "做过生产"
+  ],
+  "worker_expectation": [
+    "普工",
+    "操作工",
+    "装配工",
+    "组装工",
+    "包装工",
+    "生产工",
+    "流水线工",
+    "电子厂普工"
+  ],
+  "meikang_industry": [
+    "IVD",
+    "体外诊断",
+    "医疗器械",
+    "医疗耗材",
+    "诊断试剂",
+    "生化",
+    "免疫",
+    "化学发光"
+  ],
+  "meikang_business": [
+    "海外销售",
+    "国际销售",
+    "外贸",
+    "海外市场",
+    "海外代理商",
+    "海外经销商",
+    "海外客户开发"
+  ],
+  "agv": [
+    "AGV",
+    "AMR",
+    "移动机器人",
+    "搬运机器人"
+  ],
+  "brands": [
+    "凯乐士",
+    "海康",
+    "极智嘉",
+    "华睿"
+  ],
+  "agv_advanced_weights": {
+    "agv": 60,
+    "independent": 10,
+    "vendor": 10,
+    "team": 10,
+    "travel": 5,
+    "certificate": 5
+  },
+  "agv_basic_weights": {
+    "agv": 65,
+    "vendor": 25,
+    "certificate": 5,
+    "left_job": 5
+  },
+  "vendor": ["乙方"],
+  "vendor_implementation": ["实施", "部署", "调试", "交付"]
+}

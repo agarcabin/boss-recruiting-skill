@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.env
+*.sqlite3
+*.sqlite3-*
+profiles/
+runtime/
+dist/
+outputs/
+artifacts/
