@@ -2,10 +2,11 @@
     [Parameter(Mandatory = $true)][long]$WindowHandle,
     [Parameter(Mandatory = $true)][string]$OutputDir,
     [string]$PythonPath = "",
+    [string]$SafetyPythonPath = "",
     [double]$ScrollRatio = 0.75,
     [int]$MaxPages = 20,
     [string]$Run,
-    [string]$Db,
+    [string]$LedgerDb,
     [int]$Generation = 0,
     [switch]$KeepPages
 )
@@ -39,6 +40,9 @@ if ([string]::IsNullOrWhiteSpace($PythonPath)) {
         "python"
     }
 }
+if ([string]::IsNullOrWhiteSpace($SafetyPythonPath)) {
+    $SafetyPythonPath = $PythonPath
+}
 $OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
 $screen = [System.Windows.Forms.SystemInformation]::VirtualScreen
 $pipeline = Join-Path $PSScriptRoot "resume_image_pipeline.py"
@@ -46,7 +50,7 @@ $pipeline = Join-Path $PSScriptRoot "resume_image_pipeline.py"
 
 function Invoke-CaptureGuard([scriptblock]$Action) {
     if (-not $Run) { & $Action; return }
-    $bytes=[Text.Encoding]::UTF8.GetBytes([IO.Path]::GetFullPath($Db).ToLowerInvariant())
+    $bytes=[Text.Encoding]::UTF8.GetBytes([IO.Path]::GetFullPath($LedgerDb).ToLowerInvariant())
     $sha=[Security.Cryptography.SHA256]::Create()
     try {$hash=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant().Substring(0,24)}finally{$sha.Dispose()}
     $mutex=[Threading.Mutex]::new($false,('Local\CodexRecruiting_'+$hash))
@@ -54,12 +58,13 @@ function Invoke-CaptureGuard([scriptblock]$Action) {
     try {
         $held=$mutex.WaitOne(5000)
         if(-not $held){throw 'capture_action_lock_timeout'}
-        $check=& $PythonPath (Join-Path $PSScriptRoot 'run_safety.py') --db $Db check --run $Run --generation $Generation
+        $check=& $SafetyPythonPath (Join-Path $PSScriptRoot 'run_safety.py') --db $LedgerDb check --run $Run --generation $Generation
         if($LASTEXITCODE -ne 0){throw 'capture_run_stopped'}
         & $Action
     } finally {if($held){$mutex.ReleaseMutex()};$mutex.Dispose()}
 }
 
+$script:CaptureResumeDocument = $null
 function Find-ResumeDocument {
     $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$WindowHandle)
     if ($null -eq $root) {
@@ -73,6 +78,7 @@ function Find-ResumeDocument {
         [System.Windows.Automation.TreeScope]::Descendants,
         $documentCondition
     )
+    $visibleResumes = New-Object System.Collections.Generic.List[object]
     for ($index = 0; $index -lt $documents.Count; $index++) {
         $document = $documents.Item($index)
         $valuePattern = $null
@@ -81,10 +87,35 @@ function Find-ResumeDocument {
                 [System.Windows.Automation.ValuePattern]::Pattern,
                 [ref]$valuePattern
             ) -and
-            $valuePattern.Current.Value -like "*c-resume*"
+            $valuePattern.Current.Value -like "https://www.zhipin.com/web/frame/c-resume/*" -and
+            -not $document.Current.IsOffscreen
         ) {
-            return $document
+            $visibleResumes.Add($document)
         }
+    }
+    if ($visibleResumes.Count -gt 1) { throw "resume_document_ambiguous" }
+    if ($visibleResumes.Count -eq 1) {
+        if ($null -ne $script:CaptureResumeDocument -and
+            (($script:CaptureResumeDocument.GetRuntimeId() -join ',') -ne ($visibleResumes[0].GetRuntimeId() -join ','))) {
+            throw "resume_document_changed_during_capture"
+        }
+        $script:CaptureResumeDocument = $visibleResumes[0]
+        return $script:CaptureResumeDocument
+    }
+    # Chromium can omit a live nested iframe from FindAll. Revalidate the SAME
+    # cached element and its bounded raw ancestry; never retry scrolling/reload.
+    if ($null -ne $script:CaptureResumeDocument) {
+        try {
+            $cached=$script:CaptureResumeDocument; $value=$null
+            if ($cached.Current.IsOffscreen -or
+                -not $cached.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern,[ref]$value) -or
+                $value.Current.Value -notlike 'https://www.zhipin.com/web/frame/c-resume/*') { return $null }
+            $ancestor=$cached; $rootKey=($root.GetRuntimeId() -join ',')
+            for($depth=0; $ancestor -and $depth -lt 35; $depth++) {
+                if(($ancestor.GetRuntimeId() -join ',') -eq $rootKey) { return $cached }
+                $ancestor=[System.Windows.Automation.TreeWalker]::RawViewWalker.GetParent($ancestor)
+            }
+        } catch [System.Windows.Automation.ElementNotAvailableException] { return $null }
     }
     return $null
 }
@@ -98,29 +129,95 @@ function Get-ResumeScrollContext {
         }
     }
     $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
+    $candidates = New-Object System.Collections.Generic.List[object]
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+
+    function Add-ResumeCandidate($Element, [string]$Locator) {
+        if ($null -eq $Element) { return }
+        try {
+            $runtimeKey = (@($Element.GetRuntimeId()) -join ",")
+            if ([string]::IsNullOrWhiteSpace($runtimeKey) -or -not $seen.Add($runtimeKey)) { return }
+            $scrollPattern = $null
+            if (
+                $Element.TryGetCurrentPattern(
+                    [System.Windows.Automation.ScrollPattern]::Pattern,
+                    [ref]$scrollPattern
+                ) -and
+                $scrollPattern.Current.VerticallyScrollable
+            ) {
+                $priority = if ($Element.Current.ClassName -eq "resume-detail-wrap") { 0 }
+                    elseif ($Element.Current.AutomationId -eq "resume") { 1 }
+                    elseif ($Element -eq $resume) { 2 }
+                    else { 3 }
+                $candidates.Add([pscustomobject]@{
+                    element = $Element
+                    pattern = $scrollPattern
+                    locator = $Locator
+                    priority = $priority
+                    runtimeKey = $runtimeKey
+                })
+            }
+        } catch { }
+    }
+
+    # The resume surface may be exposed as a nested c-resume document containing
+    # div#resume (AutomationId=resume), while older views expose its scroll owner
+    # as an ancestor named resume-detail-wrap. Probe both directions without
+    # focusing the page or scanning the recommendation document.
     $current = $resume
     for ($depth = 0; $depth -lt 8 -and $null -ne $current; $depth++) {
-        $scrollPattern = $null
         if (
-            $current.Current.ClassName -eq "resume-detail-wrap" -and
-            $current.TryGetCurrentPattern(
-                [System.Windows.Automation.ScrollPattern]::Pattern,
-                [ref]$scrollPattern
-            ) -and
-            $scrollPattern.Current.VerticallyScrollable
-        ) {
+            $current.Current.ClassName -eq "resume-detail-wrap" -or
+            $current.Current.AutomationId -eq "resume" -or
+            $current -eq $resume
+        ) { Add-ResumeCandidate $current "ancestor:$depth" }
+        $current = $walker.GetParent($current)
+    }
+
+    foreach ($property in @(
+        [pscustomobject]@{ name = "ClassName"; value = "resume-detail-wrap" },
+        [pscustomobject]@{ name = "AutomationId"; value = "resume" }
+    )) {
+        $propertyInfo = if ($property.name -eq "ClassName") {
+            [System.Windows.Automation.AutomationElement]::ClassNameProperty
+        } else {
+            [System.Windows.Automation.AutomationElement]::AutomationIdProperty
+        }
+        $condition = New-Object System.Windows.Automation.PropertyCondition($propertyInfo, $property.value)
+        $matches = $resume.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition)
+        for ($index = 0; $index -lt $matches.Count; $index++) {
+            Add-ResumeCandidate $matches.Item($index) "descendant:$($property.name)=$($property.value)"
+            $current = $walker.GetParent($matches.Item($index))
+            for ($depth = 0; $depth -lt 8 -and $null -ne $current -and $current -ne $resume; $depth++) {
+                if ($current.Current.ClassName -eq "resume-detail-wrap") {
+                    Add-ResumeCandidate $current "resume-owner-of:$($property.name)"
+                }
+                $current = $walker.GetParent($current)
+            }
+        }
+    }
+
+    if ($candidates.Count -gt 0) {
+        $bestPriority = ($candidates | Measure-Object -Property priority -Minimum).Minimum
+        $best = @($candidates | Where-Object { $_.priority -eq $bestPriority })
+        if ($best.Count -eq 1) {
             return [ordered]@{
                 present = $true
                 resume = $resume
-                wrapper = $current
-                pattern = $scrollPattern
+                wrapper = $best[0].element
+                pattern = $best[0].pattern
+                locator = $best[0].locator
             }
         }
-        $current = $walker.GetParent($current)
+        return [ordered]@{
+            present = $false
+            reason = "resume_scroll_target_ambiguous"
+            candidates = $best.Count
+        }
     }
     return [ordered]@{
         present = $false
-        reason = "resume_detail_wrap_scroll_target_missing"
+        reason = "resume_scroll_target_missing_after_layer_fallbacks"
     }
 }
 
@@ -241,7 +338,7 @@ if (-not $bottomConfirmed) {
 $longPath = Join-Path $OutputDir "resume-long.png"
 $offsetText = ($offsets | ForEach-Object { [string]$_ }) -join ","
 if ($Run) {
-    $stitchJson = & $PythonPath (Join-Path $PSScriptRoot 'managed_helper.py') --db $Db --run $Run --generation $Generation -- $PythonPath $pipeline stitch --pages @pagePaths --offsets $offsetText --output $longPath
+ $stitchJson = & $PythonPath (Join-Path $PSScriptRoot 'managed_helper.py') --db $LedgerDb --run $Run --generation $Generation -- $PythonPath $pipeline stitch --pages @pagePaths --offsets $offsetText --output $longPath
 } else {
     $stitchJson = & $PythonPath $pipeline stitch --pages @pagePaths --offsets $offsetText --output $longPath
 }

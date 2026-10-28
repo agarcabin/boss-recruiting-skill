@@ -191,6 +191,29 @@ class CandidateLogTests(unittest.TestCase):
         finally:
             workbook.close()
 
+    def test_not_found_policy_survives_record_and_reserve(self):
+        payload = self.assessment(75)
+        payload['coworker_progress'] = {'state': 'not_found', 'lookup_completed': True,
+                                       'evidence': 'Directed checks completed; no coworker header in live frames'}
+        self.record(payload)
+        result = invoke(ledger.reserve, self.db, run=self.run, candidate_id=self.candidate)
+        self.assertEqual(result['state'], 'ready')
+
+    def test_fractional_action_time_can_be_finalized_twice_and_finished(self):
+        self.record(self.assessment(score=55, decision="review", hard_requirements=False))
+        invoke(ledger.note, self.db, run=self.run, candidate_id=self.candidate, result="review")
+        invoke(candidate_log.sync, self.db, run=self.run, candidate_id=self.candidate, output_root=self.root)
+        stamp = ledger.now().replace(microsecond=123456).isoformat()
+        first = invoke(candidate_log.finalize_timing, self.db, run=self.run,
+                       candidate_id=self.candidate, ended_at=stamp, output_root=self.root)
+        repeated = invoke(candidate_log.finalize_timing, self.db, run=self.run,
+                          candidate_id=self.candidate, ended_at=stamp, output_root=self.root)
+        self.assertEqual(repeated["state"], "timing_already_finalized")
+        finished = invoke(ledger.candidate_finish, self.db, run=self.run,
+                          candidate_id=self.candidate, ended_at=stamp)
+        self.assertEqual(finished["state"], "finished_candidate")
+        self.assertEqual(first["candidate_ended_at"], finished["candidate_ended_at"])
+
     def test_reports_and_rebuild_separate_positions_on_the_same_day(self):
         first = self.record(self.assessment(score=72, decision="review", hard_requirements=False))
         profile = self.root / "assembly.md"

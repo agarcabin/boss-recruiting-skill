@@ -32,6 +32,20 @@ class CoworkerProgressTests(unittest.TestCase):
         self.assertEqual(self.result("2026-10-27 10:00")["action"], "review")
         self.assertEqual(coworker_progress.evaluate({"state":"empty"}, self.at)["action"], "review")
 
+    def test_not_found_continues_only_after_completed_lookup(self):
+        observation = {"state": "not_found", "lookup_completed": True,
+                       "evidence": "Unique visible BOSS document queried; coworker header absent"}
+        result = coworker_progress.evaluate(observation, self.at)
+        self.assertEqual(result["action"], "continue")
+        self.assertEqual(result["state"], "not_found")
+        self.assertTrue(result["lookup_completed"])
+        self.assertEqual(coworker_progress.evaluate(result, self.at)["action"], "continue")
+        for broken in ({**observation, "lookup_completed": False},
+                       {**observation, "evidence": ""},
+                       {**observation, "first_greeting_at": "2026-01-01 10:00"},
+                       {**observation, "state": "unavailable"}):
+            self.assertEqual(coworker_progress.evaluate(broken, self.at)["action"], "review")
+
 
 if __name__ == "__main__":
     unittest.main()

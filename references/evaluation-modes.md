@@ -7,7 +7,7 @@
 岗位front matter指定 evaluation_mode: card/resume 与 trigger_policy: worker/meikang/agv_advanced/agv_basic。无配置的历史项目采用legacy原评分口径。项目元数据与每轮快照保存candidate_namespace，改显示名不重算身份。
 
 - worker：8个普通岗位，包括铆工，统一列表规则；不保留旧学历、工龄、图纸、技能、地点、班次或最低分拦截。优势或期望任一正向命中即招呼。优势60、期望40，同组不重复，仅作记录。
-- meikang：既有严格底线与缺项review口径不变。底线允许且（行业组和业务组各命中1词，或综合分>=本轮min_score）即招呼。
+- meikang：按当前已审核岗位底线和缺项口径执行。2026-10-28用户批准：本人明确的医药/IVD/医疗器械/耗材海外销售实战经历可作为沟通能力初筛依据，未写英语商务能力不单独拦截或扣分；记录为经历推定，不虚写直接语言证明，明确英语不能工作仍拦截。其他年限、渠道、学历和地点条件独立判断。底线允许且（行业组和业务组各命中1词，或综合分>=本轮min_score）即招呼。
 - agv_advanced（海康、华睿）：四品牌任一工作经历（brand_work）与任何AGV经历（agv）分别判断，可以来自不同经历，不要求品牌工作属于AGV；另要求独立实施、乙方实施、带队现场实施、常年出差。任一要求明确不符拦截，未知允许；AGV60、独立10、乙方10、带队10、出差5、任何证书5，满分100，未知0分，品牌工作不另计分，离职不加分。删除旧generic_agv_experience额外20分。
 - agv_basic（凯乐士、极智嘉）：AGV经历或乙方实施经历，任一项有效命中即可招呼，只有乙方实施经历也可以；两项都明确不符才拦截，未知允许。一项failed不阻止另一项有效命中，也不能凭failed项的关键词触发。AGV65、乙方25、任何证书5、明确离职5，满分100，未知0分；乙方关键词须有本人正向实施/部署/调试/交付语境。
 - AGV的requirement_states逐项使用met/unknown/failed，不能伪造已满足；证书不按数量累加。规则配置version=3适用于新运行，既有version=2快照沿用旧判断与旧权重，不改写历史运行。
@@ -41,7 +41,7 @@ start新策略必须提供--stop-binding，本轮绑定经stop_controller.probe_
 
 ## 可取消的采集与OCR
 
-长截图、OCR及等待helper通过managed_helper.py --db <db> --run <id> --generation <gate值> -- <可执行文件> <本包脚本> ...启动。该入口登记PID及创建时间并独立检查停止/截止，不接受任意UI脚本。resume_capture.ps1本轮必须传-Run、-Db、-Generation，每次ScrollPattern前共用互斥锁重查门禁；其拼图子进程也自动登记。停止控制器只取消本轮登记且创建时间一致的helper。
+长截图、OCR及等待helper通过managed_helper.py --db <db> --run <id> --generation <gate值> -- <可执行文件> <本包脚本> ...启动。该入口登记PID及创建时间并独立检查停止/截止，不接受任意UI脚本。resume_capture.ps1本轮必须传-Run、-LedgerDb、-Generation（PowerShell保留别名Db给Debug，不可使用-Db），每次ScrollPattern前共用互斥锁重查门禁；其拼图子进程也自动登记。停止控制器只取消本轮登记且创建时间一致的helper。
 
 启动绑定示例：pwsh -File scripts/bind-codex-stop.ps1 -WindowHandle <本窗口hwnd> -ChatMarker <已读到的本聊天常驻标题> -Output <本地binding.json>。返回ready后再传给start；不猜测窗口句柄、聊天标识或runtime_id。绑定每轮重新核验，不复用旧会话。
 

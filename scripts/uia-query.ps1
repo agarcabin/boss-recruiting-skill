@@ -121,10 +121,14 @@ if (-not [string]::IsNullOrWhiteSpace($ClassName)) {
     )))
 }
 
-$condition = if ($conditions.Count -eq 1) {
+$condition = if ($conditions.Count -eq 0) {
+    # NameLike is applied below because UIA PropertyCondition supports exact names only.
+    # The caller must still provide a narrow NameLike filter when no structural condition exists.
+    [System.Windows.Automation.Condition]::TrueCondition
+} elseif ($conditions.Count -eq 1) {
     $conditions[0]
 } else {
-    New-Object System.Windows.Automation.AndCondition($conditions.ToArray())
+    [System.Windows.Automation.AndCondition]::new($conditions.ToArray())
 }
 
 $matches = $scope.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition)

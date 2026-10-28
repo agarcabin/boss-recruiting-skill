@@ -406,7 +406,7 @@ def candidate_finish(db: sqlite3.Connection, args: argparse.Namespace) -> None:
     at = now()
     ended_at = parse_time(assessment["ended_at"])
     requested_end = getattr(args, "ended_at", None)
-    if requested_end and parse_time(requested_end) != ended_at:
+    if requested_end and iso(parse_time(requested_end)) != iso(ended_at):
         output(state="blocked", reason="candidate_end_mismatch")
         return
     if ended_at > at + timedelta(seconds=5):

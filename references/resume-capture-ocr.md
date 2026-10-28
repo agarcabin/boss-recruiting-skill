@@ -4,9 +4,9 @@
 
 BOSS 电子简历 `c-resume` 的 UIA 信息只有概略内容，不能覆盖完整职业经历。启用电子简历判断时，每名候选人的生产评分都以长截图和本地 RapidOCR 取得的完整正文为依据。流程固定为：
 
-`打开电子简历 -> c-resume/resume-detail-wrap 核验 -> UIA 内层滚动 -> 分屏截图 -> 拼接长图 -> RapidOCR 分块识别 -> 本地真伪与完整性核对 -> 评分`
+`打开电子简历 -> c-resume 文档核验 -> resume-detail-wrap / div#resume 映射核验 -> UIA 内层滚动 -> 分屏截图 -> 拼接长图 -> RapidOCR 分块识别 -> 本地真伪与完整性核对 -> 评分`
 
-UIA 用于定位页面、核对控件与滚动容器；不能用 UIA 概览代替简历正文，也不能因为 UIA 显示部分经历就跳过长截图。不得改用 DOM、整页 AX、Playwright `evaluate`/`domSnapshot`、JavaScript、CDP 或剪贴板拖选抓取简历。
+UIA 用于定位页面、控件与滚动容器；不能用 UIA 概览代替简历正文，也不能因为 UIA 显示部分经历就跳过长截图。按用户要求不做姓名与卡片身份交叉核对；OCR 姓名仅用于候选人记录。简历文档缺失或正文无法读取时仍暂停该候选人。不得改用 DOM、整页 AX、Playwright `evaluate`/`domSnapshot`、JavaScript、CDP、远程 OCR 或剪贴板拖选抓取简历。
 
 长截图由固定可视区域拼接，不得按 UIA Document 的数千像素高度直接截图。
 
@@ -22,6 +22,16 @@ UIA 用于定位页面、核对控件与滚动容器；不能用 UIA 概览代�
 
 ## 采集长截图
 
+生产流程优先使用串行入口 `scripts/capture_resume.py`，不再把候选人准备、截图和OCR用分号串起来：
+
+```text
+<包内python> scripts/capture_resume.py --run <run_id> --candidate-id <当前候选键> --hwnd <实测句柄> --output-dir <新的候选人工作目录>
+```
+
+调用前必须已成功 `candidate-begin` 且核验简历打开并登记 `electronic-opened`。入口核对当前活跃候选键、运行状态、generation、截止及未使用过的输出目录，再分别经 `managed_helper.py` 采集、OCR；每阶段前后复核门禁。采集失败、未到底、证据缺失、OCR失败或中途停止都非零退出，后续阶段不启动。成功只返回 `ready_for_assessment` 和本地证据路径，不评分、不记发送、不自动重试。截图已留存但流程失败时保留目录供诊断，不复用其中旧文件冒充成功。
+
+PowerShell统一优先使用 `pwsh`。Python动作与串行采集入口通过 `powershell_host.py` 选择PATH或Codex自带PowerShell 7；仅ASCII或有UTF-8 BOM的脚本才允许回退Windows PowerShell，避免中文无BOM脚本被误解析。原始PowerShell命令用于定向诊断，不作为失败后自动重跑整条流水线的入口。
+
 先用定向 UIA 查询确认 `c-resume` Document 存在，并取得当前浏览器窗口句柄。运行：
 
 ```powershell
@@ -29,10 +39,16 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File scripts/resume_capture.ps1 `
   -WindowHandle <窗口句柄> `
   -OutputDir "<本次候选人本地工作目录>" `
-  -PythonPath "<skill>\runtime\win-x64\python\python.exe"
+  -PythonPath "<skill>\runtime\win-x64\python\python.exe" `
+  -SafetyPythonPath "<可读取本轮账本的 Python；默认与 PythonPath 相同>" `
+  -Run <run_id> -LedgerDb <ledger.sqlite3> -Generation <gate_generation>
 ```
 
-脚本只寻找 `c-resume` 的父级 `resume-detail-wrap` 滚动容器：
+`PythonPath` 用于长图拼接和 OCR；`SafetyPythonPath` 仅用于调用 `run_safety.py` 检查同一账本、运行号和 generation。默认两者相同。若便携 Python 的用户数据目录与启动运行的 Python 隔离，显式将 `SafetyPythonPath` 指向启动运行时使用的 Python，并继续把 `PythonPath` 指向便携运行时；采集仍须通过 `managed_helper.py`，不能跳过账本检查。
+
+脚本只在当前 `c-resume` Document 的有限 UIA 范围内寻找简历滚动容器。优先使用 `ClassName=resume-detail-wrap`，并兼容用户批注所指 `div#resume` 在 UIA 中映射为 `AutomationId=resume` 的页面；若正文节点自身不支持 ScrollPattern，再检查其有限祖先链中唯一可滚动的 `resume-detail-wrap`。必要时也接受 c-resume Document 本身支持纵向 ScrollPattern。多个同优先级候选或找不到滚动容器时记录明确原因，不滚动推荐列表。
+
+UIA 读取及 Win32 截图不得调用 `SetFocus()` 或强制把 BOSS 切到前台。先按 UIA 页面层级和实际 URL 找正确 c-resume Document；屏幕当前可见时用 Win32 截图。若该文档仍无可访问正文，保留页面状态并 review/不发送，不能 DOM/网页脚本读取、刷新或强制聚焦。
 
 - 使用 UIA ScrollPattern，不向宿主页面发送物理滚轮。
 - 每屏滚动约可视高度的 75%。
@@ -48,6 +64,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 - `resume-detail-wrap` 或其 ScrollPattern 消失。
 - 推荐 iframe 回到加载态或浏览器标签页重建。
 - 未达到底部却无法继续增加滚动百分比。
+
+区分真实文档消失与`FindAll`漏项：采集首次锁定唯一可见c-resume后，若后续文档枚举漏掉它，仅允许只读验证同一个缓存元素的存活、可见、URL及最多35层RawView祖先仍属于原窗口。全部通过才沿用；不重新派发上一次滚动。元素失效、URL/RuntimeId变化、多份可见简历或祖先归属失败立即报错，不能据此自动重采集。此兼容路径尚需在后续获授权的实际运行中验证，不宣称已消除所有页面消失问题。
 
 停止后若仍能控制本次自动化标签页，立即关闭它停止可能发生的刷新；无法关闭或用户正在操作时，请用户完整关闭并重新打开内置浏览器，再重新打开同一份电子简历。
 

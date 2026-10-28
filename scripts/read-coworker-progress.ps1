@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][long]$WindowHandle,
     [string]$DocumentUrlLike = "*zhipin.com/web/chat/recommend*",
-    [Parameter(Mandatory = $true)][switch]$CoworkerTabConfirmed
+    [switch]$CoworkerTabConfirmed
 )
 
 # Read-only, directed UIA. Caller first verifies/selects the visible coworker tab.
@@ -16,12 +16,8 @@ function Emit-Observation([string]$State, [string]$Timestamp, [string]$Evidence)
         state = $State
         first_greeting_at = $Timestamp
         evidence = $Evidence
+        lookup_completed = ($State -eq "not_found")
     } | ConvertTo-Json -Depth 4 -Compress
-}
-
-if (-not $CoworkerTabConfirmed) {
-    Emit-Observation "unavailable" "" "coworker_tab_not_confirmed"
-    exit
 }
 
 try {
@@ -33,7 +29,7 @@ try {
     $matchingDocuments = @()
     foreach ($document in $documents) {
         $value = $null
-        if ($document.Current.Name -eq "BOSS直聘" -and
+        if ($document.Current.Name -in @("BOSS直聘","推荐牛人") -and
             $document.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$value) -and
             $value.Current.Value -like $DocumentUrlLike -and -not $document.Current.IsOffscreen) {
             $matchingDocuments += $document
@@ -45,7 +41,30 @@ try {
         [System.Windows.Automation.AutomationElement]::NameProperty, "同事沟通进度")
     $headers = @($scope.FindAll([System.Windows.Automation.TreeScope]::Descendants, $headerCondition) |
         Where-Object { -not $_.Current.IsOffscreen })
+    if ($headers.Count -eq 0) {
+        $fallbackHeaders=New-Object System.Collections.Generic.List[object]
+        $seenHeaders=New-Object 'System.Collections.Generic.HashSet[string]'
+        foreach($other in $documents){
+            $otherValue=$null
+            if($other.Current.Name -notin @('BOSS直聘','推荐牛人') -or $other.Current.IsOffscreen -or
+               -not $other.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern,[ref]$otherValue) -or
+               $otherValue.Current.Value -notmatch '^https://www\.zhipin\.com/web/(chat/recommend(?:[?]|$)|frame/(recommend|c-resume)/)'){continue}
+            foreach($found in $other.FindAll([System.Windows.Automation.TreeScope]::Descendants,$headerCondition)){
+                if(!$found.Current.IsOffscreen -and $seenHeaders.Add(($found.GetRuntimeId() -join ','))){
+                    $fallbackHeaders.Add([pscustomobject]@{header=$found;document=$other})
+                }
+            }
+        }
+        if($fallbackHeaders.Count -eq 0){
+            Emit-Observation "not_found" "" "UIA:唯一可见起始BOSS文档及当前实际存在的主推荐/推荐iframe/简历iframe均定向查询同事沟通进度，未找到；按用户指定视为未沟通"
+            exit
+        }
+        if($fallbackHeaders.Count -ne 1){throw 'coworker_header_not_unique'}
+        $scope=$fallbackHeaders[0].document
+        $headers=@($fallbackHeaders[0].header)
+    }
     if ($headers.Count -ne 1) { throw "coworker_header_not_unique" }
+    if (-not $CoworkerTabConfirmed) { throw "coworker_tab_not_confirmed" }
     $header = $headers[0]
     $headerRect = $header.Current.BoundingRectangle
     $documentRect = $scope.Current.BoundingRectangle

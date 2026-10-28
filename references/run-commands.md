@@ -17,6 +17,8 @@ python scripts/stop_controller.py --run <id> --stop
 
 ## 开始与评估
 
+所有PowerShell脚本优先用`pwsh`执行。找不到窗口句柄时使用`resolve-recruiting-window.ps1 -ChatTitle <实测聊天标题>`只读发现，再完成停止绑定。简历采集与OCR使用`capture_resume.py --run <id> --candidate-id <键> --hwnd <实测句柄> --output-dir <新目录>`，详见[长截图与RapidOCR](resume-capture-ocr.md)。不要复用此前聊天的临时编排脚本或硬编码运行号、句柄和候选人顺序。
+
 ```text
 python scripts/ledger.py start --profile <已确认岗位文件> --target 5 --duration-min 60 --min-score <本次门槛>
 pythonw.exe scripts/progress_window.py --run <run_id>
@@ -77,4 +79,4 @@ python scripts/ledger.py candidate-finish --run <run_id> --candidate-id <平台�
 
 掉线后运行 `ledger.py control --run <run_id> --action login-required --reason session_expired`；若伴随风控提示，原因用 `risk_logout`。用户亲自登录后，核对账号、企业、岗位、城市、筛选、当前候选人和平台结果；先处理 `ledger.py unresolved`，再运行 `ledger.py control --run <run_id> --action login-confirmed --manual-confirmed`。普通 `resume` 不能跳过登录等待，超时或限制仍在时不恢复发送。
 
-`reserve` 返回 `report_not_synced`、`report_not_written`、`resume_archive_pending` 或 `pdf_archive_pending` 时，先修复简报与归档。工作簿写入中断可在关闭 Excel 后运行 `candidate_log.py rebuild`；重建指定日期使用 `rebuild --day YYYY-MM-DD`。原文件在 Excel 中占用时可用 `rebuild --day YYYY-MM-DD --output-file <新文件名.xlsx>` 生成带企业和岗位前缀的同目录副本，关闭原工作簿后再重建原文件。rebuild按日期及企业/岗位分别重建，不把多个岗位合并到一张表；返回reports列表和首个report以兼容旧调用。直接关闭进度窗口不改变运行状态；点击“结束”并确认后写入 `stopped`。
+`reserve` 返回 `report_not_synced`、`report_not_written`、`resume_archive_pending` 或 `pdf_archive_pending` 时，先修复简报与归档。工作簿写入中断可在关闭 Excel 后运行 `candidate_log.py rebuild`；重建指定日期使用 `rebuild --day YYYY-MM-DD`。原文件在 Excel 中占用时可用 `rebuild --day YYYY-MM-DD --output-file <新文件名.xlsx>` 生成带企业和岗位前缀的同目录副本，关闭原工作簿后再重建原文件。rebuild按日期及企业/岗位分别重建，不把多个岗位合并到一张表；返回reports列表和首个report以兼容旧调用。重建与同步都会保留“触发方式”和“招呼结果”的单元格值，但将简报中的两列设为隐藏。直接关闭进度窗口不改变运行状态；点击“结束”并确认后写入 `stopped`。

@@ -34,11 +34,15 @@ def evaluate(observation: dict | None, at: datetime | None = None) -> dict:
     result = {"action": "review", "reason": "coworker_check_required",
               "state": state, "first_greeting_at": observation.get("first_greeting_at"),
               "evidence": evidence, "checked_at": at.isoformat(), "skip": False,
-              "may_continue": False, "threshold_days": 7}
+              "may_continue": False, "threshold_days": 7,
+              "lookup_completed": observation.get("lookup_completed") is True}
     if not evidence:
         return result
     if state == "empty" and not observation.get("first_greeting_at"):
         return dict(result, action="continue", reason="no_coworker_greetings", may_continue=True)
+    if (state == "not_found" and observation.get("lookup_completed") is True
+            and not observation.get("first_greeting_at")):
+        return dict(result, action="continue", reason="coworker_not_found_user_policy", may_continue=True)
     if state != "first_record":
         return dict(result, reason="coworker_progress_unavailable")
     try:

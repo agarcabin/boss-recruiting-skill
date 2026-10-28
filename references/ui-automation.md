@@ -26,11 +26,39 @@ UI Automation 通过 Windows Accessibility Provider 读取 Chromium 为页面生
 2. 在其中定位 `Document: 推荐牛人`。
 3. 仅在 `推荐牛人` 子树中按 `ControlType`、`Name`、`NameLike` 或 `ClassName` 查询目标控件。
 
-推荐列表与电子简历可能同时存在，且都由 Chromium 暴露为 `Document`。读取当前打开的电子简历身份时，用 `uia-query.ps1 -DocumentName "BOSS直聘" -DocumentUrlLike "*c-resume*"` 明确选择实际 URL 含 `c-resume` 的文档，再在该文档内查询姓名；不要把推荐卡片姓名当作当前打开的电子简历姓名。
+推荐列表与电子简历可能同时存在，且都由 Chromium 暴露为 `Document`。用 `uia-query.ps1 -DocumentName "BOSS直聘" -DocumentUrlLike "*c-resume*"` 定向确认当前简历文档并采集正文；按用户要求不做简历姓名与卡片姓名的交叉核对，也不逐人请求用户身份确认。候选账本身份沿用当前卡片顺序、已核验的 UIA 控件归属及项目内候选键。不得使用 DOM 或 CUA 补读页面。
+
+## 本机实测页面层级与控件归属（2026-10-27）
+
+用户在 BOSS 页面留下的批注确认，同一视觉浮层中的控件分属不同 iframe，不能只按屏幕位置猜文档：
+
+| 功能 | 浏览器层级 / URL | 已观察到的页面控件 | 操作定位约定 |
+| --- | --- | --- | --- |
+| 推荐卡片列表 | 推荐页 `https://www.zhipin.com/web/chat/recommend`；推荐 iframe `https://www.zhipin.com/web/frame/recommend/?jobid=...`。Win32 UIA 有时把卡片挂在 `Document: BOSS直聘` 主 URL 下 | `ListItem` / `ClassName=card-item`，卡片容器类如 `candidate-card-wrap css-type-1` | 先按实际 UIA `DocumentUrl` 选唯一可见文档，再核对当前候选人完整 Name 与 viewed 状态 |
+| 悬浮电子简历正文 | 推荐 iframe 内嵌套的 `https://www.zhipin.com/web/frame/c-resume/?source=recommend`；用户批注确认该 frame 内的 `div#resume` 是简历正文区域 | 浏览器节点 `div#resume`；UIA 不一定直接映射 DOM `id`，可映射为 `AutomationId=resume`，滚动容器也可能表现为 `ClassName=resume-detail-wrap` | 只从当前 c-resume Document 定向查找；采集脚本先查已知 wrapper，再查 `AutomationId=resume` 及其滚动父级。不得用推荐卡片摘要替代简历正文，也不得用 DOM 读取正文 |
+| 悬浮简历的打招呼按钮 | 用户批注显示按钮属于父级推荐 iframe `.../web/frame/recommend/?jobid=...`，不属于 c-resume 正文 frame | 页面节点 `div.button-chat-wrap.resumeGreet > span.btn-doc > div.button-list > button.btn-v2.btn-v2-new`；UIA 应以当前实际可见文档中 `Button` / `Name=打招呼` 定位 | 即使按钮视觉上在简历浮层右侧，也回到推荐文档核验按钮；核对候选人祖先、按钮类名和发送状态，不能在 c-resume 文档里因找不到而改点列表同名按钮 |
+| 简历浮层“下一位” | 打开简历时的推荐主 Document；用户批注及本机 UIA 观察到 `Group` / `ClassName=turn-btn next`，名称可为空 | `turn-btn next` 是可复用的类名模式，不是可长期保存的控件句柄 | 每次在当前可见推荐 Document 中重新定位且要求唯一、可见、启用、支持 Invoke；从当前浮层/候选人祖先确认归属并绑定本次 RuntimeId。不得跨候选人复用旧 RuntimeId。Invoke 后核验 c-resume 文档或可见页面状态变化；`dispatched` 不代表已切换，不再比对候选姓名。 |
+
+以上 URL、CSS selector 与 DOM `#resume` 来自用户浏览器批注，是页面层级说明，不是允许使用 DOM/网页脚本的授权。Chromium 嵌入方式可能令 UIA Document 名称或 URL 所在层变化；每次仍以当前定向 UIA 返回值为准。发现 `found 0` 时，先对已存在的外层推荐 Document、推荐 iframe、c-resume iframe分别做一次控件类型和名称/类名窄查；如页面未打开简历，先确认当前状态，不能把 c-resume 缺席当成异常刷新。
+
+访问 UIA 与截图时不调用 `AutomationElement.SetFocus()`、`SetForegroundWindow()` 或其他强制聚焦手段。先在当前焦点不变的情况下尝试正确 Document URL、父/子 UIA 层和精确类名/AutomationId 查询；页面已经可见时可用 Win32 截图核对。若仍无法取得简历正文，保留原因并将该候选人记为 review/不发送，不能切换为 DOM、CUA、刷新或强制聚焦。
 
 推荐页的可访问性文档 URL 会随 BOSS/Chromium 的嵌入方式变化，不能假定“推荐牛人”总在 `*frame/recommend*` 子文档中。2026-10-22 实测，页面主 URL `https://www.zhipin.com/web/chat/recommend` 对应的 `Document: BOSS直聘` 本身就包含“推荐牛人”、岗位标题和候选卡片；用 `*frame/recommend*` 查询返回 0，是 URL 过滤器不匹配，不代表页面不可见或推荐内容不存在。
 
-若定向查询因窄 URL 过滤器返回 `found 0`，先将这视为定位条件可能不匹配：在不导航、不刷新、不使用 CUA 的前提下，对同一可见页面用 `-DocumentName "BOSS直聘" -DocumentUrlLike "*zhipin.com/web/chat/recommend*"` 做一次定向回查，并限制 `ControlType`、名称和结果数量。记录返回的 `documentUrl`，之后在该实际 Document 中查询“推荐牛人”或目标控件。仅当 UIA 已实际显示子文档 URL 含 `frame/recommend` 时才使用该 URL 模式；若主 URL 定向回查也找不到 BOSS 文档，或出现加载重置、候选控件异常归零等异常，再按停机规则处理，不得重载或用 CUA 补查。
+## 安全调用器的 Document 范围复核
+
+若查询已在某个子 `Document` 中找到目标，但 `guarded-uia-action.ps1` 报 `target_runtime_id_not_found`，先检查是否发生了“查询在局部 Document 中、调用器却从窗口根节点查 RuntimeId”的范围不一致。不要因此改用裸 `Invoke()`、坐标点击、鼠标或 CUA。
+
+安全调用器按以下顺序恢复：
+
+1. 从目标 JSON 读取必填 `document_url`，在当前窗口 UIA 树中定向枚举 `Document`，读取其 `ValuePattern` URL，并要求 URL 与目标值精确相等且只命中一个文档。
+2. 只在该唯一 `Document` 子树内重新匹配 RuntimeId，并同时复核名称、提供时的 `class_name`、可见/启用状态、候选人祖先及文档归属；目标必须仍支持所需 UIA Pattern。
+3. 匹配唯一且所有既有运行门禁通过后，才允许经 `safe_action.py` 执行一次操作。`document_url` 不唯一、目标已过期或候选人祖先不符时，保留错误并停止该动作。
+4. 操作后做一次定向状态核验；若结果仍不明确，不重复调用。记录触发问题、文档范围及修复验证，并把通用修复同步到本 Skill 与更新日志。
+
+该修复解决的是 UIA 查询范围不一致，不放宽目标身份、用户授权、运行门禁、去重或结果核验，也不构成跳过复核的理由。
+
+若定向查询因窄 URL 过滤器返回 `found 0`，先将这视为定位条件可能不匹配：在不导航、不刷新、不使用 CUA、不强制聚焦的前提下，对同一页面按上述页面层级对已存在的外层推荐 Document、推荐 iframe、c-resume iframe分别做一次定向回查，并限制 `ControlType`、名称/类名和结果数量。记录返回的 `documentUrl`，之后在实际含目标控件的 Document 中查询；若当前没有打开简历，c-resume 缺席属正常状态。若页面已打开简历但子树空，使用只读 RawViewWalker 在该 c-resume Document 的有限层级内查看 UIA 映射，再按 `AutomationId=resume` / `ClassName=resume-detail-wrap` 精确查找。只有确认真正加载重置、主文档消失或候选控件异常归零时才进入停机流程；不得强制聚焦、重载或用 CUA 补查。
 
 热态实测中，定位 `推荐牛人` Document 约 19 ms，查询全部“打招呼”按钮平均约 17 ms。单独运行 `uia-query.ps1` 的端到端耗时通常约 0.4–0.9 秒，主要来自 PowerShell 启动和 UIAutomation 初始化。需要连续核验时，优先在同一个 PowerShell 进程内缓存 Document 节点后重复查询。
 
@@ -58,6 +86,14 @@ UI Automation 通过 Windows Accessibility Provider 读取 Chromium 为页面生
 
 ## 快速读取顺序
 
+`Get-Process.MainWindowHandle=0`时不要猜句柄或假定进程名必为Codex。可用只读入口：
+
+```text
+pwsh -NoProfile -File scripts/resolve-recruiting-window.ps1 -ChatTitle <本聊天实际常驻标题>
+```
+
+该入口只枚举桌面顶层Codex/ChatGPT窗口并定向匹配可见应用Document标题及app URL，必须唯一才返回句柄；不聚焦、不点击。随后仍用`bind-codex-stop.ps1`完成聊天工具栏、scope及停止按钮核验，不能把窗口发现结果当作发送授权。窗口被遮挡或用户切到其他聊天时，保持停机/暂停规则。
+
 1. 缓存顶层窗口句柄，避免每次重新枚举窗口。若 `Get-Process` 未返回窗口句柄或 `MainWindowHandle` 为 0，使用 Win32 `GetForegroundWindow` 取得当前前台窗口 HWND，再以 `AutomationElement.FromHandle` 定向定位 BOSS 文档；不要因此改用 CUA。
 2. 从窗口根节点定位一次 `Document`，例如 `BOSS直聘`，后续只在该文档子树内查询。
 3. 优先使用 `scripts/uia-query.ps1` 的带过滤查询：
@@ -80,7 +116,7 @@ UI Automation 通过 Windows Accessibility Provider 读取 Chromium 为页面生
 - 在用 `AutomationElement.FromPoint` 做坐标命中测试的 PowerShell 进程内，先调用 `user32!SetProcessDPIAware()`。未设置 DPI awareness 时，实测命中会落到页面大小的匿名 `Group`；设置后仍可能先返回内层 `Group`，不能把它直接当作卡片。
 - 从命中元素沿 `TreeWalker.RawViewWalker` 向上检查祖先，直到找到 `ControlType.ListItem` 且 `ClassName=card-item`；核对该 ListItem 的完整 `Name` 含预期候选人姓名，并与当前可见卡片摘要一致。未找到或姓名不符时不点击。
 - 点击坐标取最新矩形内的可见安全位置；移动轨迹的起点也须处于窗口内容安全区并留出边距，避免随机假起步越出边界。先 `-DryRun` 检查轨迹，再做一次物理点击，点击后只进行一次定向核验。
-- 用户完成推荐页人工审核并回复 `1` 后，直接点击第一张当前可见的 `card-item`，点击前不截图判断姓名颜色或是否已查看。仍须通过 UIA 控件矩形和 `FromPoint` 命中确认点击位置属于卡片，且轨迹全程位于浏览器内容边界内。点击后定向查询 `c-resume` 文档；未出现时不重试，暂停并请用户手动打开电子简历。本地Excel/历史同名去重默认关闭；简历打开后按[同事去重](coworker-dedup.md)定向读取右下角“同事沟通进度”的首条时间。超过7天跳过，恰好7天或7天内继续，读取失败不当作空记录。
+- 用户完成推荐页人工审核并回复 `1` 后，按当前筛选列表顺序用 UIA 检查候选卡片状态，从第一个明确未查看的卡片开始。先按候选姓名 `Text` 定位 `ListItem`（`ClassName=card-item`），再**在该 ListItem 的子树内**用有界 `RawViewWalker` 查找唯一的包装节点；已观测结构为 `li.card-item > div.candidate-card-wrap...`，所以 `candidate-card-wrap` 是卡片内部子节点，不是 ListItem 的祖先。只检查当前候选卡片，深度最多 8 层、节点最多 300 个。包装节点 `ClassName` 含 `has-viewed` token 时视为已查看并跳过；唯一包装节点可读且不含该 token 才视为未查看。不得单凭文字灰色或颜色判断；包装节点未暴露、匹配不唯一或状态冲突时暂停请用户确认。拟人轨迹模式仍须通过 UIA 矩形与 `FromPoint` 确认目标属于该卡片，轨迹全程位于浏览器内容边界内。点击后只需确认 `c-resume` 文档出现；不做姓名比对，也不逐人请求用户确认。简历正文仍按[长截图与 RapidOCR](resume-capture-ocr.md)读取并评分；文档未出现时暂停该候选人，不重试打开。右侧箭头不可见时，可通过受门禁的 Right/Left/Escape 按键导航，详见[点击方式开关](click-modes.md)。简历打开后按[同事去重](coworker-dedup.md)读取右下角“同事沟通进度”的首条时间：严格早于7天才跳过，恰好7天或7天内继续，读取失败不当作空记录。
 
 ## 快速查询命令
 
@@ -97,6 +133,10 @@ pwsh -NoProfile -ExecutionPolicy Bypass `
 ```
 
 查询候选卡片摘要时可使用 `-ControlType ListItem -NameLike "*候选人姓名*"`。避免不带名称、类名或控件类型的全树查询。
+
+### `uia-query.ps1` 的 NameLike-only 查询
+
+`NameLike` 由脚本在目标 Document 子树中做本地通配匹配，不能直接转换成 UIA 精确名称条件。只传 `-NameLike` 时条件集合为空；旧代码仍构造 `AndCondition`，PowerShell 会报“找不到适当的构造函数”。脚本现在在这种情况下使用 `Condition.TrueCondition`，再按必填的窄 `NameLike` 过滤；如果查询卡片状态，优先同时传 `-ControlType ListItem -ClassName card-item`，并核对卡片内部 `candidate-card-wrap` 的完整类名。不要把 0 条或构造函数错误解读成候选人不在页面。
 
 只核对列表数量或控件位置时可加 `-Compact`（默认名称最多 96 字符，可用 `-NameChars` 调整），省去 ValuePattern 和其他详细字段。`nameTruncated=true` 表示名称不完整；紧凑结果不得用于稳定 ID 判断、发送目标确认或点击前命中复核，这些场景仍使用完整的定向查询。默认输出格式不变。
 

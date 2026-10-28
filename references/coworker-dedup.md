@@ -9,7 +9,8 @@
 - 首条时间严格早于当前时间减7天（超过168小时）：重复跳过，不评分、不发送。
 - 7天内或恰好7天：继续本岗位评估；“继续”不等于立即发送。
 - 面板明确显示没有同事沟通记录：继续。
-- 面板没找到、未确认选中了同事页签、时间缺失/模糊/未来或面板没有位于顶部：未核验，不等同于无记录；不自动发送。页面异常仍按停机规则处理。
+- 用户2026-10-27明确指定“如果没找到，那就是没打过”。当前BOSS页面及文档有效，在主推荐/推荐iframe/简历iframe中完成分层定向查询后仍未找到同事进度，记录 `state:not_found, lookup_completed:true` 并继续；保留实际查询证据，不改写成明确空面板的 `empty`。
+- 已找到面板但未确认选中同事页签、首条时间缺失/模糊/未来或面板不在顶部，以及文档缺失/异常：`unavailable`，不自动发送。不能把技术异常当作“未找到记录”。
 
 无时区的完整日期时间按北京时间UTC+08:00解释。只接受带年份且有时分的时间，不猜测“昨天”或缺少年份的日期。本规则优先于岗位文件中历史“近7天已沟通跳过/备选”及本地姓名去重说明；不用修改历史已确认岗位文件。
 
@@ -23,15 +24,17 @@ pwsh -NoProfile -File scripts/read-coworker-progress.ps1 -WindowHandle <当前HW
 python scripts/coworker_progress.py --input <当前候选人-coworker.json>
 ```
 
-提取器只在唯一可见的BOSS文档里定位“同事沟通进度”标题，限制最多6层小范围祖先、面板内最多120个文本节点；不提升为整页扫描。按控件纵向位置选第一条“向Ta发起沟通”，只取该条日期。默认文档URL模式是`*zhipin.com/web/chat/recommend*`；实测文档不同时使用本轮定向UIA实际返回的URL模式，不猜测URL、不导航或刷新补救。提取器只读、不点击、不滚动，不使用CUA、DOM或网页脚本。尚需在实际页面验证UIA暴露情况；定位失败返回unavailable，不能伪造空记录。
+提取器先在唯一可见的BOSS文档里定向定位“同事沟通进度”标题；无标题时，在实际存在的主推荐、推荐iframe和简历iframe分别定向复查并按RuntimeId去重。面板读取限制最多6层小范围祖先、120个文本节点；不提升为整页扫描。按控件纵向位置选第一条“向Ta发起沟通”，只取该条日期。默认文档URL模式是`*zhipin.com/web/chat/recommend*`；实测文档不同时使用本轮UIA实际返回的URL模式。提取器只读、不点击、不滚动，不使用CUA、DOM、网页脚本、导航或刷新；完整查找确实未发现标题才返回not_found，文档/数据异常返回unavailable。
 
-观测JSON契约只有三项：
+观测JSON契约示例：
 
 ```json
 {"state":"first_record","first_greeting_at":"2026-06-05 09:22","evidence":"UIA：同事沟通进度首条，实际控件文本与时间"}
 ```
 
-`state`为`first_record`、`empty`或`unavailable`。只有实际明确读到空记录才使用`empty`；`evidence`必须描述本次当前候选人的定向观察，不能照抄示例。
+`state`为`first_record`、`empty`、`not_found`或`unavailable`。`not_found`必须有`lookup_completed:true`及实际查询证据；只有明确读到空面板才用`empty`。`evidence`描述当前候选人的实际观察，不能照抄示例。旧`unavailable`历史记录不自动改判。
+
+页签未找到时可省略 `-CoworkerTabConfirmed`：提取器只读检查实际存在的文档，完整查找仍无标题才输出 `not_found`。标题存在但未确认选中时返回 `unavailable`；不得虚传已确认。URL匹配不到唯一可见起始文档也返回 `unavailable`。
 
 ## 逐人留痕
 

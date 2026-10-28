@@ -17,6 +17,7 @@ from pathlib import Path
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 from pypdf import PdfReader
 
 import ledger
@@ -290,6 +291,10 @@ def workbook(db, root: Path, started_at: str, filename: str | None = None,
     summary.column_dimensions["F"].width = 48
     summary.column_dimensions["G"].width = 48
     summary.column_dimensions["H"].width = 14
+    for hidden_header in ("触发方式", "招呼结果"):
+        summary.column_dimensions[
+            get_column_letter(headers.index(hidden_header) + 1)
+        ].hidden = True
     for col in details.columns:
         letter = col[0].column_letter
         details.column_dimensions[letter].width = min(
@@ -399,7 +404,7 @@ def finalize_timing(db, args):
         if ended_at < ledger.parse_time(active["started_at"]):
             raise ValueError("candidate_end_before_start")
         if row["ended_at"]:
-            if ledger.parse_time(row["ended_at"]) != ended_at:
+            if ledger.iso(ledger.parse_time(row["ended_at"])) != ledger.iso(ended_at):
                 raise ValueError("candidate_timing_already_finalized")
             db.commit()
             output(state="timing_already_finalized", candidate_ended_at=ledger.iso(ended_at))
