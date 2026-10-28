@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = 'release-manifest.json'
 SOURCE = 'update-source.json'
 TOP_FILES = {'SKILL.md', 'CHANGELOG.md', 'README.md', SOURCE}
-MANAGED_DIRS = {'scripts', 'references', 'agents'}
+MANAGED_DIRS = {'scripts', 'references', 'agents', 'profiles'}
 SUFFIXES = {'.py', '.ps1', '.md', '.json', '.yaml', '.yml', '.txt'}
 LIMIT = 32 * 1024 * 1024
 
@@ -66,6 +66,8 @@ def managed_name(name: str) -> bool:
         return False
     if any(re.fullmatch(r'(?i)(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?', p) for p in path.parts):
         return False
+    if len(path.parts) > 1 and path.parts[0] == 'profiles':
+        return path.suffix == '.md' or path.name == 'project.json'
     return name in TOP_FILES or (len(path.parts) > 1 and path.parts[0] in MANAGED_DIRS
                                 and path.suffix in SUFFIXES and '__pycache__' not in path.parts)
 

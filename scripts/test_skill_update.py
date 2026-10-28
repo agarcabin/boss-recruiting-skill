@@ -53,15 +53,51 @@ class SkillUpdateTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 updater.version_key(bad)
 
-    def test_package_excludes_profiles_runtime_credentials_and_generated_files(self):
-        for name in ('profiles/private.md', 'runtime/python.exe', 'scripts/__pycache__/x.pyc', '.env'):
+    def test_package_includes_profiles_but_excludes_runtime_credentials_and_generated_files(self):
+        included = ('profiles/company/job/approved.md', 'profiles/company/job/project.json',
+                    'profiles/审核记录.md')
+        excluded = ('profiles/candidate.png', 'profiles/ledger.sqlite3', 'profiles/credentials.json',
+                    'runtime/python.exe', 'scripts/__pycache__/x.pyc', '.env')
+        for name in included + excluded:
             path = self.remote / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('local-only', encoding='utf-8')
         result = updater.build(self.remote, self.base / 'other-packages')
         with ZipFile(result['archive']) as archive:
             self.assertTrue(all(updater.managed_name(n) or n == updater.MANIFEST for n in archive.namelist()))
-            self.assertNotIn('profiles/private.md', archive.namelist())
+            for name in included:
+                self.assertIn(name, archive.namelist())
+            for name in excluded:
+                self.assertNotIn(name, archive.namelist())
+
+    def test_profile_update_installs_full_text_and_backs_up_previous_approval(self):
+        name = 'profiles/企业/岗位/标准化信息.md'
+        old = 'approval: approved\n旧审核与固定话术'.encode('utf-8')
+        new = 'approval: approved\n新审核与完整固定话术'.encode('utf-8')
+        target = self.local / name
+        target.parent.mkdir(parents=True)
+        target.write_bytes(old)
+        files = updater.unpack(self.archive, '1.01', self.repository)
+        files[name] = new
+        backup = updater.install(self.local, files, self.base / 'backups')
+        self.assertEqual(target.read_bytes(), new)
+        self.assertEqual((backup / name).read_bytes(), old)
+
+    def test_profile_rollback_restores_approval_when_install_fails(self):
+        name = 'profiles/company/approved.md'
+        target = self.local / name
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b'old approved profile')
+        files = updater.unpack(self.archive, '1.01', self.repository)
+        files[name] = b'new approved profile'
+        replace = updater.os.replace
+        def fail_after_profile(src, dst):
+            if str(dst).endswith('skill_update.py'):
+                raise OSError('simulated failure after profile')
+            return replace(src, dst)
+        with patch.object(updater.os, 'replace', side_effect=fail_after_profile), self.assertRaises(OSError):
+            updater.install(self.local, files, self.base / 'backups')
+        self.assertEqual(target.read_bytes(), b'old approved profile')
 
     def test_available_same_older_and_no_release(self):
         with patch.object(updater, 'fetch', side_effect=self.fetch):
@@ -145,15 +181,17 @@ class SkillUpdateTests(unittest.TestCase):
                 archive.writestr(name, data)
         return output.getvalue()
 
-    def test_unsafe_archive_paths_and_local_profile_overwrite_are_rejected(self):
+    def test_unsafe_archive_paths_and_unlisted_profile_entries_are_rejected(self):
         for name in ('../outside.py', '/outside.py', 'scripts/../../outside.py',
-                     'scripts\\outside.py', 'profiles/approved.md', 'runtime/python.exe', 'scripts/CON'):
+                     'scripts\\outside.py', 'profiles/../../approved.md', 'runtime/python.exe', 'scripts/CON'):
             with self.subTest(name=name):
                 self.assertFalse(updater.managed_name(name))
                 # ZipFile normalizes Windows backslashes on write; a normalized
                 # added file must still fail the exact manifest file list check.
                 with self.assertRaises(ValueError):
                     updater.unpack(self.repack({name: b'bad'}), '1.01', self.repository)
+        with self.assertRaisesRegex(ValueError, 'manifest_file_mismatch'):
+            updater.unpack(self.repack({'profiles/approved.md': b'unlisted'}), '1.01', self.repository)
 
     def test_manifest_mismatch_and_tampered_file_are_rejected(self):
         tampered = self.repack(change=lambda files: files.update({'scripts/skill_update.py': b'tampered'}))

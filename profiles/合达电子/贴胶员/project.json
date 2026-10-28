@@ -1,0 +1,13 @@
+{
+  "format": "boss-recruiting-project/v1",
+  "project_id": "heda-taping",
+  "company": "合达电子",
+  "position": "贴胶员（普工）",
+  "profile_schema": "boss-greeting-profile/v1",
+  "profile": "合达电子-贴胶员-标准化信息.md",
+  "created_at": "2026-10-26T02:49:54+00:00",
+  "updated_at": "2026-10-27T00:00:00+08:00",
+  "candidate_namespace": "合达电子-贴胶员",
+  "evaluation_mode": "card",
+  "trigger_policy": "worker"
+}

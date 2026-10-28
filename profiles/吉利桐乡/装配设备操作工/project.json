@@ -1,0 +1,13 @@
+{
+  "format": "boss-recruiting-project/v1",
+  "project_id": "xingqu-assembly-equipment",
+  "company": "桐乡星驱科技",
+  "position": "装配设备操作工（普工）",
+  "profile_schema": "boss-greeting-profile/v1",
+  "profile": "吉利桐乡-装配设备操作工-标准化信息.md",
+  "created_at": "2026-10-26T02:49:54+00:00",
+  "updated_at": "2026-10-27T00:00:00+08:00",
+  "candidate_namespace": "桐乡星驱科技-装配设备操作工",
+  "evaluation_mode": "card",
+  "trigger_policy": "worker"
+}

@@ -21,15 +21,15 @@ runtime/win-x64/python/python.exe scripts/skill_update.py update
 
 ## 更新范围
 
-发布包只包含SKILL.md、CHANGELOG.md、README.md、update-source.json及agents/references/scripts。下载后核对ZIP的SHA-256和包内每个文件的清单、哈希、版本与仓库；拒绝越界路径、符号链接和覆盖本地数据的条目。
+从1.0.8起，发布包包含SKILL.md、CHANGELOG.md、README.md、update-source.json、agents/references/scripts，以及profiles中的全部岗位Markdown、审核记录、索引和project.json。profiles只接受.md与名为project.json的配置文件。下载后核对ZIP的SHA-256和包内每个文件的清单、哈希、版本与仓库；拒绝越界路径、符号链接、未列入清单及候选人/运行数据条目。
 
-安装前在本机用户数据目录保存被替换文件和restore.json；普通安装失败自动回滚。SKILL.md版本标记最后替换。profiles、便携runtime、Git目录、候选人资料、账本、截图及运行报表保留本地，更新不上传或覆盖。备份位于%LOCALAPPDATA%/Codex/recruiting-greetings/updates/backups。
+安装前在本机用户数据目录保存被替换文件和restore.json；普通安装失败自动回滚。SKILL.md版本标记最后替换。包内同路径profiles文件先备份再替换，未随包提供的本地岗位不删除；便携runtime、Git目录、候选人资料、账本、截图及运行报表不上传、不覆盖。备份位于%LOCALAPPDATA%/Codex/recruiting-greetings/updates/backups。
 
 检查版本而不下载安装可执行scripts/skill_update.py check。自动检查只在选择“更新项目”时发生，不创建后台定时任务。
 
 ## 发布新版本
 
-正式发布基线为1.0.0；后续沿用每次+0.01的约定，1.0.0按1.00计算，随后1.01、1.02。当前版本见SKILL.md；更新器同时支持三段式版本及两位小数版本，比较时1.10对应1.1.0。
+当前采用三段式版本a.b.c，常规更新只将c加1，c超过10也不进位；只有用户明确要求b+1才修改b。当前版本见SKILL.md；旧两位小数版本仅作兼容。
 
 完成修改和验证后同步版本与日志，再构建附件：
 
@@ -37,4 +37,8 @@ runtime/win-x64/python/python.exe scripts/skill_update.py update
 python scripts/skill_update.py build --output <发布附件目录>
 ```
 
-将通用Skill源码提交并推送到update-source.json指定仓库，保留profiles及runtime在本地。创建与版本一致的正式Release（标签v<版本号>），上传boss-recruiting-<版本号>.zip及同名.zip.sha256两个附件；使用gh release create的--notes-file传入发布说明。发布后实际运行check核对版本与附件，并从GitHub下载验证；不要将仅推送分支或仅创建标签当作可用更新。
+将Skill源码与完整profiles（企业岗位配置、审核记录、固定话术、project.json及索引）提交并推送到update-source.json指定仓库；runtime和候选人运行数据只保留本地。创建与版本一致的正式Release（标签v<版本号>），上传boss-recruiting-<版本号>.zip及同名.zip.sha256两个附件；使用gh release create的--notes-file传入发布说明。发布后实际运行check核对版本与附件，并从GitHub下载验证；不要将仅推送分支或仅创建标签当作可用更新。
+
+## 从旧更新器迁移
+
+1.0.7及以前的更新器禁止profiles，因此不能直接安装1.0.8完整包。首次迁移应下载1.0.8完整ZIP，先备份原Skill，解压合并覆盖Skill文件（保留runtime）；以后正常使用更新入口。不得仅改旧版本号绕过包校验。发布时明确告知此兼容事项。

@@ -1,0 +1,13 @@
+{
+  "format": "boss-recruiting-project/v1",
+  "project_id": "meikang-international-sales",
+  "company": "美康生物科技股份有限公司",
+  "position": "国际销售经理",
+  "profile_schema": "boss-greeting-profile/v1",
+  "profile": "美康生物-国际销售经理-标准化信息.md",
+  "created_at": "2026-10-20T01:51:13+00:00",
+  "updated_at": "2026-10-28T00:00:00+08:00",
+  "candidate_namespace": "美康生物科技股份有限公司-国际销售经理",
+  "evaluation_mode": "resume",
+  "trigger_policy": "meikang"
+}

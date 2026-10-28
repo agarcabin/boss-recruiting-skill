@@ -16,6 +16,8 @@ python scripts/skill_update.py update
 python scripts/skill_update.py build --output dist
 ```
 
-仓库与发布包包含通用指令、脚本和规则。岗位配置、候选人资料、账本、运行报表、凭据及便携runtime保留在使用者本机。更新会保留这些本地内容；岗位可另用Skill的项目分享与导入功能迁移。实际招聘发送需要用户授权。
+从1.0.8起，仓库与发布包包含通用指令、脚本、规则，以及全部企业完整岗位配置、审核记录、固定话术和project.json。当前共13个已审核岗位，见profiles/企业岗位索引.md。更新会备份并替换包内同路径的岗位文件，其他本地岗位保留；候选人资料、账本、运行报表、凭据及便携runtime不上传、不覆盖。审核结论随岗位保存，实际发送前仍须核验当前账号、岗位页面并取得用户授权。
+
+1.0.7及更早的旧更新器不接受含profiles的发布包：首次升级到1.0.8请下载完整ZIP，先备份原Skill，再解压合并覆盖；不要删除本地runtime。随后可正常使用“更新项目”入口。
 
 发布维护流程见references/github-updates.md。
