@@ -59,6 +59,84 @@ class RecruitingV2(unittest.TestCase):
 
     def reserve(self): return call(ledger.reserve,self.db,run=self.run,candidate_id=self.candidate)
 
+    def greeting_mode(self,mode):
+        self.rules['greeting_mode']=mode
+        self.db.execute('UPDATE runs SET rule_snapshot=? WHERE run_id=?',(json.dumps(self.rules),self.run))
+
+    def test_new_run_defaults_single_and_explicit_triple_is_frozen(self):
+        original=ledger.run_row(self.db,self.run)
+        self.assertEqual(recruiting_rules.run_greeting_mode(original),'single')
+        result=call(ledger.start,self.db,profile=str(self.profile),target=150,duration_min=240,min_score=70,greeting_mode='triple')
+        self.assertEqual(result['greeting_mode'],'triple')
+        self.assertEqual(call(ledger.status,self.db,run=result['run_id'])['greeting_mode'],'triple')
+        self.assertEqual(recruiting_rules.run_greeting_mode(original),'single')
+
+    def test_greeting_mode_precedence_invalid_and_old_snapshot(self):
+        metadata=self.profile.parent/'project.json'
+        metadata.write_text(json.dumps(dict(greeting_mode='triple')),encoding='utf-8')
+        fields=ledger.profile_check(self.profile)[2]
+        self.assertEqual(recruiting_rules.snapshot(self.profile,fields)['greeting_mode'],'triple')
+        self.assertEqual(recruiting_rules.snapshot(self.profile,dict(fields,greeting_mode='single'))['greeting_mode'],'single')
+        self.assertEqual(recruiting_rules.snapshot(self.profile,dict(fields,greeting_mode='single'),'triple')['greeting_mode'],'triple')
+        with self.assertRaisesRegex(ValueError,'invalid_greeting_mode'):
+            recruiting_rules.snapshot(self.profile,fields,'invalid')
+        self.assertEqual(recruiting_rules.run_greeting_mode(dict(rule_snapshot='{}')),'triple')
+
+    def test_single_first_message_can_finish_and_followups_cannot_dispatch(self):
+        self.record(self.card());self.greeting_mode('single')
+        reservation=self.reserve()
+        self.assertEqual(call(ledger.candidate_finish,self.db,run=self.run,candidate_id=self.candidate)['reason'],'candidate_workflow_incomplete')
+        call(ledger.resolve,self.db,token=reservation['token'],result='sent',min_gap=80,max_gap=80)
+        for index in (2,3):
+            with self.assertRaisesRegex(ValueError,'single_greeting_disallows_followups'):
+                run_safety.begin_message(self.db,self.run,self.candidate,index)
+        self.assertEqual(self.db.execute('SELECT COUNT(*) FROM message_attempts').fetchone()[0],1)
+        call(candidate_log.sync,self.db,run=self.run,candidate_id=self.candidate,output_root=self.root)
+        stamp=ledger.iso(ledger.now())
+        call(candidate_log.finalize_timing,self.db,run=self.run,candidate_id=self.candidate,ended_at=stamp,output_root=self.root)
+        self.assertEqual(call(ledger.candidate_finish,self.db,run=self.run,candidate_id=self.candidate,ended_at=stamp)['state'],'finished_candidate')
+        self.assertTrue(call(ledger.gate,self.db,run=self.run)['may_start_candidate'])
+
+    def test_single_blocks_continue_and_text_but_allows_next_resume(self):
+        run=ledger.run_row(self.db,self.run)
+        for action in ('invoke','mouse'):
+            for name in ('继续沟通','继续打招呼','发送'):
+                with self.subTest(action=action,name=name),self.assertRaisesRegex(ValueError,'single_greeting_disallows_followups'):
+                    safe_action.validate_greeting_action(run,action,dict(name=name))
+        with self.assertRaisesRegex(ValueError,'single_greeting_disallows_followups'):
+            safe_action.validate_greeting_action(run,'send-text',dict(name='输入框'))
+        for action,name in (('invoke','打招呼'),('invoke','下一位'),('key','Right')):
+            safe_action.validate_greeting_action(run,action,dict(name=name))
+
+    def test_single_finish_still_requires_confirmed_first_message(self):
+        self.record(self.card());self.greeting_mode('single');reservation=self.reserve()
+        call(ledger.resolve,self.db,token=reservation['token'],result='sent',min_gap=80,max_gap=80)
+        self.db.execute("UPDATE message_attempts SET status='unknown' WHERE token=?",(reservation['token'],))
+        self.assertEqual(call(ledger.candidate_finish,self.db,run=self.run,candidate_id=self.candidate)['reason'],'greeting_messages_incomplete')
+
+    def test_explicit_triple_retains_three_message_requirement(self):
+        self.record(self.card());self.greeting_mode('triple');reservation=self.reserve()
+        call(ledger.resolve,self.db,token=reservation['token'],result='sent',min_gap=80,max_gap=80)
+        self.assertEqual(call(ledger.candidate_finish,self.db,run=self.run,candidate_id=self.candidate)['reason'],'greeting_messages_incomplete')
+        for index in (2,3):
+            attempt=run_safety.begin_message(self.db,self.run,self.candidate,index)
+            run_safety.resolve_message(self.db,attempt['token'],'sent')
+        call(candidate_log.sync,self.db,run=self.run,candidate_id=self.candidate,output_root=self.root)
+        stamp=ledger.iso(ledger.now())
+        call(candidate_log.finalize_timing,self.db,run=self.run,candidate_id=self.candidate,ended_at=stamp,output_root=self.root)
+        self.assertEqual(call(ledger.candidate_finish,self.db,run=self.run,candidate_id=self.candidate,ended_at=stamp)['state'],'finished_candidate')
+
+    def test_single_dispatch_rejects_followup_attempt_before_launch(self):
+        self.record(self.card());self.greeting_mode('triple');reservation=self.reserve()
+        call(ledger.resolve,self.db,token=reservation['token'],result='sent',min_gap=80,max_gap=80)
+        second=run_safety.begin_message(self.db,self.run,self.candidate,2)
+        self.greeting_mode('single')  # Simulate a stale/mismatched followup token.
+        with patch.object(safe_action.subprocess,'Popen') as process:
+            with self.assertRaisesRegex(ValueError,'single_greeting_disallows_followups'):
+                safe_action.dispatch(self.db,self.run,0,['never-run'],second['token'])
+            process.assert_not_called()
+        self.assertEqual(self.db.execute('SELECT status FROM message_attempts WHERE token=?',(second['token'],)).fetchone()[0],'pending')
+
     def test_worker_expectation_only_bypasses_score_gate_and_resume_requirements(self):
         self.record(self.card())
         row=self.db.execute('SELECT * FROM assessments').fetchone()
@@ -90,10 +168,11 @@ class RecruitingV2(unittest.TestCase):
 
     def test_keyword_negation_advert_and_positive_after_but(self):
         self.policy('worker')
+        coworker=dict(state='absent',lookup_completed=True,evidence='fixture: current card checked, no colleague icon')
         for text in ('没做过组装','没有电子厂经验','招聘广告：有组装经验','不考虑普工'):
-            result=recruiting_rules.evaluate(self.rules,dict(card=dict(advantage=text,expectation=text)),70)
+            result=recruiting_rules.evaluate(self.rules,dict(card=dict(advantage=text,expectation=text,coworker_contact=coworker)),70)
             self.assertFalse(result['eligible'],text)
-        result=recruiting_rules.evaluate(self.rules,dict(card=dict(advantage='没做过组装但有流水线经验',expectation='')),70)
+        result=recruiting_rules.evaluate(self.rules,dict(card=dict(advantage='没做过组装但有流水线经验',expectation='',coworker_contact=coworker)),70)
         self.assertTrue(result['eligible']);self.assertEqual(result['score'],60)
 
     def test_both_worker_groups_score_100_and_contacted_blocks(self):

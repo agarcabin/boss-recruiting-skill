@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 5,
   "worker_advantage": [
     "组装",
     "进厂",
@@ -66,6 +66,97 @@
     "certificate": 5,
     "left_job": 5
   },
-  "vendor": ["乙方"],
-  "vendor_implementation": ["实施", "部署", "调试", "交付"]
+  "vendor": [
+    "乙方"
+  ],
+  "vendor_implementation": [
+    "实施",
+    "部署",
+    "调试",
+    "交付"
+  ],
+  "meikang_companies": [
+    "迈瑞医疗",
+    "新产业生物",
+    "亚辉龙",
+    "普门科技",
+    "雷杜生命科学",
+    "万孚生物",
+    "安图生物",
+    "奥泰生物",
+    "东方基因",
+    "圣湘生物",
+    "达安基因",
+    "华大基因",
+    "华大智造",
+    "凯普生物",
+    "之江生物",
+    "伯杰医疗",
+    "硕世生物",
+    "优思达",
+    "帝迈生物",
+    "理邦仪器",
+    "优利特",
+    "赛科希德",
+    "爱威科技",
+    "中元汇吉",
+    "禾信仪器",
+    "融智生物",
+    "开立医疗",
+    "阳普医疗"
+  ],
+  "meikang_direct_business": [
+    "海外",
+    "出口",
+    "销售",
+    "业务"
+  ],
+  "meikang_export_products": [
+    "生化",
+    "化学发光",
+    "质谱"
+  ],
+  "meikang_overseas": [
+    "海外",
+    "国际",
+    "境外",
+    "国外",
+    "外贸",
+    "欧洲",
+    "欧盟",
+    "美国",
+    "北美",
+    "南美",
+    "东南亚",
+    "中东",
+    "非洲",
+    "拉美",
+    "亚太",
+    "overseas",
+    "international",
+    "foreign",
+    "export"
+  ],
+  "meikang_experience_penalties": [
+    {
+      "below_years": 2,
+      "deduct": 10
+    },
+    {
+      "below_years": 3,
+      "deduct": 5
+    }
+  ],
+  "meikang_company_aliases": {
+    "迈瑞医疗": [
+      "迈瑞生物医疗"
+    ],
+    "开立医疗": [
+      "开立生物医疗"
+    ],
+    "理邦仪器": [
+      "理邦精密仪器"
+    ]
+  },
+  "meikang_quick_base_score": 80
 }

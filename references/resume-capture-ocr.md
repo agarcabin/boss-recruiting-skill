@@ -2,13 +2,9 @@
 
 ## 适用场景
 
-BOSS 电子简历 `c-resume` 的 UIA 信息只有概略内容，不能覆盖完整职业经历。启用电子简历判断时，每名候选人的生产评分都以长截图和本地 RapidOCR 取得的完整正文为依据。流程固定为：
+长截图与本地RapidOCR是可选的简历读取工具，用户已删除其强制前置要求。同事检查仍须在简历分析前完成；根据实际读取的内容判断，未读部分记未知。UIA概要不等于完整简历，不能虚报完整性，但内容足以支持判断时不因缺少长图/OCR而阻止运行。
 
-`打开电子简历 -> c-resume 文档核验 -> resume-detail-wrap / div#resume 映射核验 -> UIA 内层滚动 -> 分屏截图 -> 拼接长图 -> RapidOCR 分块识别 -> 本地真伪与完整性核对 -> 评分`
-
-UIA 用于定位页面、控件与滚动容器；不能用 UIA 概览代替简历正文，也不能因为 UIA 显示部分经历就跳过长截图。按用户要求不做姓名与卡片身份交叉核对；OCR 姓名仅用于候选人记录。简历文档缺失或正文无法读取时仍暂停该候选人。不得改用 DOM、整页 AX、Playwright `evaluate`/`domSnapshot`、JavaScript、CDP、远程 OCR 或剪贴板拖选抓取简历。
-
-长截图由固定可视区域拼接，不得按 UIA Document 的数千像素高度直接截图。
+采集工具可保持自身文件/拼图校验，失败仅表示本次采集未完成，不要求整轮停止。控制口径见 [control-policy.md](control-policy.md)。CUA、DOM、网页脚本、CDP限制保持。
 
 ## 运行环境
 
@@ -28,7 +24,7 @@ UIA 用于定位页面、控件与滚动容器；不能用 UIA 概览代替简�
 <包内python> scripts/capture_resume.py --run <run_id> --candidate-id <当前候选键> --hwnd <实测句柄> --output-dir <新的候选人工作目录>
 ```
 
-调用前必须已成功 `candidate-begin` 且核验简历打开并登记 `electronic-opened`。入口核对当前活跃候选键、运行状态、generation、截止及未使用过的输出目录，再分别经 `managed_helper.py` 采集、OCR；每阶段前后复核门禁。采集失败、未到底、证据缺失、OCR失败或中途停止都非零退出，后续阶段不启动。成功只返回 `ready_for_assessment` 和本地证据路径，不评分、不记发送、不自动重试。截图已留存但流程失败时保留目录供诊断，不复用其中旧文件冒充成功。
+调用不再要求预先登记、活跃候选键或截止门禁；选用该工具时仍使用全新目录，避免把旧图误认为当前内容。输出只表示采集结果，不发送。失败可按真实已读取内容继续评估，不编造缺失证据。
 
 PowerShell统一优先使用 `pwsh`。Python动作与串行采集入口通过 `powershell_host.py` 选择PATH或Codex自带PowerShell 7；仅ASCII或有UTF-8 BOM的脚本才允许回退Windows PowerShell，避免中文无BOM脚本被误解析。原始PowerShell命令用于定向诊断，不作为失败后自动重跑整条流水线的入口。
 
@@ -44,11 +40,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -Run <run_id> -LedgerDb <ledger.sqlite3> -Generation <gate_generation>
 ```
 
-`PythonPath` 用于长图拼接和 OCR；`SafetyPythonPath` 仅用于调用 `run_safety.py` 检查同一账本、运行号和 generation。默认两者相同。若便携 Python 的用户数据目录与启动运行的 Python 隔离，显式将 `SafetyPythonPath` 指向启动运行时使用的 Python，并继续把 `PythonPath` 指向便携运行时；采集仍须通过 `managed_helper.py`，不能跳过账本检查。
+`PythonPath` 用于长图拼接和 OCR；`SafetyPythonPath` 仅用于调用 `run_safety.py` 检查同一账本、运行号和 generation。默认两者相同。若便携 Python 的用户数据目录与启动运行的 Python 隔离，显式将 `SafetyPythonPath` 指向启动运行时使用的 Python，并继续把 `PythonPath` 指向便携运行时；可使用managed_helper.py登记helper，便于结束时取消。
 
 脚本只在当前 `c-resume` Document 的有限 UIA 范围内寻找简历滚动容器。优先使用 `ClassName=resume-detail-wrap`，并兼容用户批注所指 `div#resume` 在 UIA 中映射为 `AutomationId=resume` 的页面；若正文节点自身不支持 ScrollPattern，再检查其有限祖先链中唯一可滚动的 `resume-detail-wrap`。必要时也接受 c-resume Document 本身支持纵向 ScrollPattern。多个同优先级候选或找不到滚动容器时记录明确原因，不滚动推荐列表。
 
-UIA 读取及 Win32 截图不得调用 `SetFocus()` 或强制把 BOSS 切到前台。先按 UIA 页面层级和实际 URL 找正确 c-resume Document；屏幕当前可见时用 Win32 截图。若该文档仍无可访问正文，保留页面状态并 review/不发送，不能 DOM/网页脚本读取、刷新或强制聚焦。
+UIA 读取及 Win32 截图不得调用 `SetFocus()` 或强制把 BOSS 切到前台。先按 UIA 页面层级和实际 URL 找正确 c-resume Document；屏幕当前可见时用 Win32 截图。若该文档仍无可访问正文，保留页面状态并 review/不发送，不能使用DOM/网页脚本或强制聚焦；可按控制策略有界恢复页面。
 
 - 使用 UIA ScrollPattern，不向宿主页面发送物理滚轮。
 - 每屏滚动约可视高度的 75%。
@@ -58,7 +54,7 @@ UIA 读取及 Win32 截图不得调用 `SetFocus()` 或强制把 BOSS 切到前�
 - 同时写入 `resume-capture.json`，记录页数、偏移、尺寸、滚动百分比和底部确认状态。
 - 拼接成功后默认删除逐屏截图；只在异常排查时加 `-KeepPages`。
 
-以下任一情况立即停止，不自动恢复：
+以下情况表示本次采集失败，可依控制策略恢复或使用实际可读内容继续：
 
 - `c-resume` Document 消失。
 - `resume-detail-wrap` 或其 ScrollPattern 消失。
@@ -67,7 +63,7 @@ UIA 读取及 Win32 截图不得调用 `SetFocus()` 或强制把 BOSS 切到前�
 
 区分真实文档消失与`FindAll`漏项：采集首次锁定唯一可见c-resume后，若后续文档枚举漏掉它，仅允许只读验证同一个缓存元素的存活、可见、URL及最多35层RawView祖先仍属于原窗口。全部通过才沿用；不重新派发上一次滚动。元素失效、URL/RuntimeId变化、多份可见简历或祖先归属失败立即报错，不能据此自动重采集。此兼容路径尚需在后续获授权的实际运行中验证，不宣称已消除所有页面消失问题。
 
-停止后若仍能控制本次自动化标签页，立即关闭它停止可能发生的刷新；无法关闭或用户正在操作时，请用户完整关闭并重新打开内置浏览器，再重新打开同一份电子简历。
+采集失败保留真实诊断信息；不再要求自动关闭整个浏览器或必须人工重开后才继续。
 
 ## RapidOCR
 
@@ -97,7 +93,7 @@ UIA 读取及 Win32 截图不得调用 `SetFocus()` 或强制把 BOSS 切到前�
 - 平均行置信度：`0.9930`
 - 六个不同任职时间段、教育经历和页脚均被识别
 
-该数字只是一次本地样本，不保证所有排版均有相同准确率。评分前必须核对公司和职位连续性、任职时间、职责、业绩数字、教育和页脚；无法确认时不得声称完整率 100%。
+该数字只是一次本地样本，不保证所有排版均有相同准确率。根据实际可读字段判断，缺失项记未知，不把章节完整性作为继续条件；无法确认时不得声称完整率 100%。
 
 ## 所有 OCR 候选人的证据归档
 
@@ -124,7 +120,7 @@ UIA 读取及 Win32 截图不得调用 `SetFocus()` 或强制把 BOSS 切到前�
     姓名-标识摘要.ocr.json
 ```
 
-`<企业>-<岗位>-投递记录.xlsx` 最后一列“查看简历”链接到对应长图。已发送候选人若尚未归档，状态为 `pending`；`saved` 或经说明记录为 `missing` 前，不得处理下一名候选人。长截图或 OCR 确实无法取得时使用：
+`<企业>-<岗位>-投递记录.xlsx` 最后一列“查看简历”在有长图时链接到对应文件。尚未归档时如实保留 `pending`，不阻止处理下一名候选人。长截图或 OCR 无法取得时可记录原因：
 
 ```powershell
 & "<skill>\runtime\win-x64\python\python.exe" scripts/candidate_log.py --output-root "<桌面路径>" missing-resume `

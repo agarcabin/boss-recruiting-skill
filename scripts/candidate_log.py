@@ -22,6 +22,10 @@ from pypdf import PdfReader
 
 import ledger
 import coworker_progress
+import candidate_checks
+import daily_metrics
+import report_batch
+import fast_assessment
 import recruiting_rules
 import run_safety
 from report_paths import profile_identity, report_filename
@@ -40,7 +44,7 @@ DETAIL_HEADERS = ["录入时间", "项目", "岗位", "运行编号", "候选人
                   "电子简历判断", "PDF归档", "PDF路径", "PDF说明",
                   "简历图片", "简历OCR文本", "简历OCR结果", "简历归档", "简历归档说明",
                   "同事去重", "首条同事招呼时间", "同事去重依据"]
-GREEN_FILL = "C6EFCE"
+GREEN_FILL = daily_metrics.GREEN
 GREEN_FONT = "006100"
 YELLOW_FILL = "FFEB9C"
 YELLOW_FONT = "9C6500"
@@ -173,18 +177,14 @@ def validate(payload: dict) -> dict:
     if payload["electronic_resume_enabled"] and payload["overall_score"] != electronic_score:
         raise ValueError("overall_score must equal electronic score")
     attachment_score, attachment_evidence = score_source(payload, "attachment", True)
-    if payload["decision"] == "greet" and not payload["hard_requirements"] and not hard_override and payload.get("trigger_policy","legacy") not in ("worker","agv_advanced","agv_basic"):
+    if payload["decision"] == "greet" and not payload["hard_requirements"] and not hard_override and payload.get("trigger_policy","legacy") not in ("worker","agv_advanced","agv_basic") and not payload.get("direct_trigger"):
         raise ValueError("greet requires hard requirements met")
     if hard_override and payload["decision"] != "greet":
         raise ValueError("hard requirement override is only valid for an authorized greeting")
     evidence = payload.get("resume_evidence")
-    if payload["electronic_resume_enabled"] and not evidence:
-        raise ValueError("resume_evidence required when electronic_resume_enabled is true")
     if evidence is not None:
         if not isinstance(evidence, dict):
             raise ValueError("resume_evidence must be an object")
-        if not str(evidence.get("image", "")).strip() or not str(evidence.get("ocr_text", "")).strip():
-            raise ValueError("resume_evidence image and ocr_text required")
     coworker = ({"may_continue": True, "action": "not_applicable", "evidence": "列表模式不检查详情同事记录"}
                 if payload.get("evaluation_mode")=="card" else coworker_progress.evaluate(payload.get("coworker_progress"), ledger.now()))
     if payload["decision"] == "greet" and not coworker["may_continue"]:
@@ -198,6 +198,8 @@ def validate(payload: dict) -> dict:
 
 def workbook(db, root: Path, started_at: str, filename: str | None = None,
              profile_path: Path | str | None = None) -> Path:
+    queued=report_batch.request(db,root,started_at,filename,profile_path)
+    if queued is not None:return queued
     folder = daily_dir(root, started_at)
     folder.mkdir(parents=True, exist_ok=True)
     wb = Workbook()
@@ -209,12 +211,11 @@ def workbook(db, root: Path, started_at: str, filename: str | None = None,
     details = wb.create_sheet("详细信息")
     details.append(DETAIL_HEADERS)
     details.sheet_state = "hidden"
-    rows = db.execute("""SELECT a.*, r.profile_path FROM assessments a
-        JOIN runs r ON r.run_id=a.run_id WHERE a.started_at>=? AND a.started_at<?
-        ORDER BY a.started_at,a.candidate_name""", (
-            datetime.fromisoformat(started_at).astimezone(CN_TZ).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).isoformat(),
-            (datetime.fromisoformat(started_at).astimezone(CN_TZ).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).astimezone(timezone.utc).isoformat(),
-        )).fetchall()
+    if profile_path is None:
+        candidates=db.execute('SELECT DISTINCT profile_path FROM runs').fetchall()
+        if len(candidates)!=1: raise ValueError('report_profile_required_for_multiple_or_no_projects')
+        profile_path=candidates[0][0]
+    rows=daily_metrics.rows(db,profile_path,started_at)
     if profile_path is None:
         identities = {profile_identity(row["profile_path"]) for row in rows}
         if len(identities) != 1:
@@ -230,9 +231,10 @@ def workbook(db, root: Path, started_at: str, filename: str | None = None,
         duration = judgment_duration_text(row["started_at"], row["ended_at"])
         duration_seconds = judgment_seconds(row["started_at"], row["ended_at"])
         coworker = json.loads(row["coworker_progress"] or "{}")
-        coworker_skipped = coworker.get("action") == "skip" and row["decision"] == "skip"
-        label = "重复跳过" if coworker_skipped else decision_label(row["decision"])
-        overall_score = None if coworker_skipped else row["overall_score"]
+        coworker_skipped = (coworker.get("action") == "skip" or json.loads(row["eligibility_json"] or "{}").get("trigger")=="coworker_skip") and row["decision"] == "skip"
+        coworker_unknown=json.loads(row["eligibility_json"] or "{}").get("trigger")=="coworker_unknown"
+        label = "重复跳过" if coworker_skipped else "同事检查待处理" if coworker_unknown else decision_label(row["decision"])
+        overall_score = None if coworker_skipped or coworker_unknown else row["overall_score"]
         summary.append([entered_at, row["candidate_name"], overall_score, label, duration,
                         row["pros"], row["cons"], json.loads(row["eligibility_json"] or "{}").get("trigger","score"),
                         message_summary(db,row), "查看名片" if row["evaluation_mode"]=="card" else "查看简历"])
@@ -258,7 +260,7 @@ def workbook(db, root: Path, started_at: str, filename: str | None = None,
                         row["resume_ocr_json_path"] or "", row["resume_archive_status"],
                         row["resume_archive_note"] or "", coworker.get("action", "未核验"),
                         coworker.get("first_greeting_at") or "", coworker.get("evidence", "")])
-        style = decision_style(row["decision"])
+        style = (GREEN_FILL,GREEN_FONT) if daily_metrics.confirmed_sent(row) else decision_style("review") if row["decision"]=="review" else None
         if style:
             fill, font_color = style
             for cell in summary[summary.max_row]:
@@ -269,11 +271,13 @@ def workbook(db, root: Path, started_at: str, filename: str | None = None,
                 cell.font = Font(color=font_color)
     evidence_sheet=wb.create_sheet("评估证据")
     evidence_sheet.sheet_state="hidden"
-    evidence_sheet.append(["运行编号","候选人哈希","模式","触发依据","三句状态","卡片图","UIA原文","计时来源"])
+    evidence_sheet.append(["运行编号","候选人哈希","模式","触发依据","招呼消息状态","卡片图","UIA原文","计时来源","收藏状态"])
+    has_favorites=db.execute("SELECT 1 FROM sqlite_master WHERE name='favorite_results'").fetchone()
     for item in rows:
         if profile_identity(item["profile_path"])==identity:
-            attempts=[dict(x) for x in db.execute("SELECT message_index,status FROM message_attempts WHERE run_id=? AND candidate_hash=? ORDER BY message_index",(item["run_id"],item["candidate_hash"]))]
-            evidence_sheet.append([item["run_id"],item["candidate_hash"],item["evaluation_mode"],item["eligibility_json"],json.dumps(attempts,ensure_ascii=False),item["card_image_path"],item["card_uia_path"],item["timing_source"]])
+            attempts=attempt_rows(db,item['run_id'],item['candidate_hash'])
+            favorite=db.execute('SELECT state FROM favorite_results WHERE run_id=? AND candidate_hash=?',(item['run_id'],item['candidate_hash'])).fetchone() if has_favorites else None
+            evidence_sheet.append([item["run_id"],item["candidate_hash"],item["evaluation_mode"],item["eligibility_json"],json.dumps(attempts,ensure_ascii=False),item["card_image_path"],item["card_uia_path"],item["timing_source"],favorite[0] if favorite else '未记录'])
     for ws in (summary, details):
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
@@ -319,16 +323,37 @@ def record(db, args, payload=None):
     payload = dict(payload)
     payload["evaluation_mode"] = rules.get("mode","resume")
     payload["trigger_policy"] = rules.get("policy","legacy")
-    result = recruiting_rules.evaluate(rules,payload,run["min_score"])
+    payload.setdefault("decision","greet")
+    digest=ledger.run_candidate_hash(db,args.run,payload['candidate_id'])
+    existing=db.execute('SELECT * FROM assessments WHERE run_id=? AND candidate_hash=?',(args.run,digest)).fetchone()
+    active=db.execute('SELECT * FROM candidate_progress WHERE run_id=? AND candidate_hash=?',(args.run,digest)).fetchone() if existing else None
+    if active is None:active=ledger.ensure_candidate(db,args.run,payload['candidate_id'],payload.get('started_at'))
+    payload["started_at"]=active['started_at']
+    unscored=None
+    if rules.get('mode')!='card':
+        observation=payload.get('coworker_progress') or candidate_checks.get(db,args.run,payload['candidate_id'])
+        checked=candidate_checks.record(db,args.run,payload['candidate_id'],observation or {})
+        if payload['decision']=='greet' and not checked['may_continue']:
+            raise ValueError('coworker_check_before_analysis: '+str(checked.get('reason',checked['action'])))
+        payload['coworker_progress']=observation
+        if not checked['may_continue']:
+            payload.update(decision='skip' if checked.get('skip') else 'review',overall_score=0,
+                           hard_requirements=False,electronic_resume_enabled=False)
+            payload.pop('electronic',None);payload.pop('resume_evidence',None)
+            unscored=dict(eligible=False,score=0,trigger='coworker_skip' if checked.get('skip') else 'coworker_unknown',hits=[],requirements={})
+    if payload.get("overall_score") is not None:payload.setdefault("score_before_experience",payload["overall_score"])
+    result=unscored or fast_assessment.evaluate(rules,payload,recruiting_rules.positive_hits)
+    if result and result.get('method')=='direct_rule':payload=fast_assessment.fill(payload,result)
+    if result is None:result=recruiting_rules.evaluate(rules,payload,run['min_score'])
     if rules.get("policy","legacy") != "legacy":
         payload["overall_score"] = result["score"]
         if payload.get("electronic"): payload["electronic"] = dict(payload["electronic"],score=result["score"])
         if rules.get("mode")=="card":
             if payload["electronic_resume_enabled"]: raise ValueError("card_must_not_open_resume")
             payload["list"] = {"score":result["score"],"evidence":json.dumps(result["hits"],ensure_ascii=False) or "未命中"}
-        elif not payload["electronic_resume_enabled"]: raise ValueError("resume_policy_requires_electronic")
     if payload["decision"]=="greet" and not result["eligible"]:
         raise ValueError(f"greet requires score >= {run['min_score']} or valid keyword and permitted requirements")
+    payload["direct_trigger"]=bool(result.get("direct_channels"))
     scores = validate(payload)
     payload["started_at"] = datetime.fromisoformat(payload["started_at"]).astimezone(timezone.utc).isoformat(timespec="seconds")
     run = ledger.run_row(db, args.run)
@@ -336,25 +361,23 @@ def record(db, args, payload=None):
         raise ValueError("assessment_not_eligible")
     _, _, fields = ledger.profile_check(Path(run["profile_path"]))
     digest = ledger.run_candidate_hash(db,args.run,payload["candidate_id"])
-    active = ledger.active_progress(db, args.run)
-    if not active or active["candidate_hash"] != digest:
-        raise ValueError("candidate_not_active; run ledger.py candidate-begin first")
-    if db.execute("SELECT 1 FROM assessments WHERE run_id=? AND candidate_hash=?", (args.run, digest)).fetchone():
-        raise ValueError("candidate already assessed; use sync for status changes")
+    digest=active['candidate_hash']
     resume_paths = [None, None, None]
+    warnings=[]
     if scores["resume_evidence"]:
-        resume_paths = archive_resume_files(
-            args.output_root,
-            payload["started_at"],
-            str(payload["candidate_name"]).strip(),
-            digest,
-            scores["resume_evidence"],
-        )
-    card_paths = archive_card_files(args.output_root,payload["started_at"],payload["candidate_name"],digest,payload) if rules.get("mode")=="card" else (None,None)
-    if scores["resume_evidence"]:
-        payload["resume_evidence"] = dict(image=resume_paths[0],ocr_text=resume_paths[1],ocr_json=resume_paths[2])
+        try:
+            resume_paths = archive_resume_files(args.output_root,payload["started_at"],str(payload["candidate_name"]).strip(),digest,scores["resume_evidence"])
+            payload["resume_evidence"] = dict(image=resume_paths[0],ocr_text=resume_paths[1],ocr_json=resume_paths[2])
+        except (ValueError,OSError) as exc:
+            warnings.append('简历归档待补：'+str(exc))
+    card_paths=(None,None)
+    if rules.get("mode")=="card":
+        try: card_paths=archive_card_files(args.output_root,payload["started_at"],payload["candidate_name"],digest,payload)
+        except (ValueError,OSError) as exc: warnings.append('卡片归档待补：'+str(exc))
     status = "assessed" if payload["decision"] == "greet" else payload["decision"]
     stamp = ledger.iso(ledger.now())
+    recorded=db.execute('SELECT status FROM candidates WHERE candidate_hash=?',(digest,)).fetchone()
+    if recorded:status=recorded['status']
     db.execute("""INSERT INTO assessments (
         run_id,candidate_hash,candidate_name,started_at,ended_at,list_score,list_evidence,
         electronic_score,electronic_evidence,attachment_score,attachment_evidence,overall_score,
@@ -362,7 +385,13 @@ def record(db, args, payload=None):
         decision,pros,cons,electronic_enabled,send_status,pdf_status,pdf_path,
         pdf_note,updated_at,report_written,resume_image_path,resume_ocr_text_path,
         resume_ocr_json_path,resume_archive_status,assessed_at
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(run_id,candidate_hash) DO UPDATE SET
+        list_score=excluded.list_score,list_evidence=excluded.list_evidence,
+        electronic_score=excluded.electronic_score,electronic_evidence=excluded.electronic_evidence,
+        overall_score=excluded.overall_score,hard_requirements=excluded.hard_requirements,
+        decision=excluded.decision,pros=excluded.pros,cons=excluded.cons,
+        updated_at=excluded.updated_at,report_written=0""",
         (args.run, digest, str(payload["candidate_name"]).strip(), payload["started_at"], "",
          scores["list_score"], scores["list_evidence"], scores["electronic_score"], scores["electronic_evidence"],
          scores["attachment_score"], scores["attachment_evidence"], payload["overall_score"],
@@ -379,53 +408,29 @@ def record(db, args, payload=None):
         db.execute("UPDATE assessments SET pdf_status='not_applicable' WHERE run_id=? AND candidate_hash=?",(args.run,digest))
     db.execute("UPDATE assessments SET coworker_progress=? WHERE run_id=? AND candidate_hash=?",
                (json.dumps(scores["coworker_progress"], ensure_ascii=False), args.run, digest))
-    path = workbook(db, args.output_root, payload["started_at"], profile_path=run["profile_path"])
-    db.execute("UPDATE assessments SET report_written=1 WHERE run_id=? AND candidate_hash=?", (args.run, digest))
-    output(state="recorded", candidate_hash=digest[:12], report=str(path), decision=payload["decision"])
-
-
-def finalize_timing(db, args):
-    digest = ledger.run_candidate_hash(db, args.run, args.candidate_id)
-    ended_at = ledger.parse_time(args.ended_at)
-    at = ledger.now()
-    if ended_at > at + timedelta(seconds=5):
-        raise ValueError("candidate_end_in_future")
-    db.execute("BEGIN IMMEDIATE")
+    path=None
     try:
-        active = ledger.active_progress(db, args.run)
-        if not active or active["candidate_hash"] != digest:
-            raise ValueError("candidate_not_active")
-        row = db.execute(
-            "SELECT started_at,ended_at FROM assessments WHERE run_id=? AND candidate_hash=?",
-            (args.run, digest),
-        ).fetchone()
-        if not row:
-            raise ValueError("assessment_missing")
-        if ended_at < ledger.parse_time(active["started_at"]):
-            raise ValueError("candidate_end_before_start")
-        if row["ended_at"]:
-            if ledger.iso(ledger.parse_time(row["ended_at"])) != ledger.iso(ended_at):
-                raise ValueError("candidate_timing_already_finalized")
-            db.commit()
-            output(state="timing_already_finalized", candidate_ended_at=ledger.iso(ended_at))
-            return
-        stamp = ledger.iso(ended_at)
-        db.execute(
-            "UPDATE assessments SET ended_at=?,updated_at=?,report_written=0 "
-            "WHERE run_id=? AND candidate_hash=?",
-            (stamp, ledger.iso(at), args.run, digest),
-        )
-        path = workbook(db, args.output_root, row["started_at"],
-                        profile_path=ledger.run_row(db, args.run)["profile_path"])
-        db.execute(
-            "UPDATE assessments SET report_written=1 WHERE run_id=? AND candidate_hash=?",
-            (args.run, digest),
-        )
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    output(state="timing_finalized", candidate_ended_at=stamp, report=str(path))
+        path=workbook(db,args.output_root,payload["started_at"],profile_path=run["profile_path"])
+        report_batch.mark_written(db,args.run,digest)
+    except (OSError,ValueError) as exc:
+        warnings.append('表格待补写：'+str(exc))
+    output(state="recorded",candidate_hash=digest[:12],report=str(path) if path else None,decision=payload["decision"],warnings=warnings)
+
+
+def finalize_timing(db,args):
+    digest=ledger.run_candidate_hash(db,args.run,args.candidate_id)
+    try: stamp=ledger.iso(ledger.parse_time(args.ended_at))
+    except (ValueError,TypeError): stamp=ledger.iso(ledger.now())
+    row=db.execute('SELECT started_at FROM assessments WHERE run_id=? AND candidate_hash=?',(args.run,digest)).fetchone()
+    if not row:
+        output(state='timing_skipped',warnings=['尚无评估记录；不阻止下一位']); return
+    db.execute('UPDATE assessments SET ended_at=?,updated_at=?,report_written=0 WHERE run_id=? AND candidate_hash=?',(stamp,ledger.iso(ledger.now()),args.run,digest))
+    path=None; warnings=[]
+    try:
+        path=workbook(db,args.output_root,row['started_at'],profile_path=ledger.run_row(db,args.run)['profile_path'])
+        report_batch.mark_written(db,args.run,digest)
+    except (OSError,ValueError) as exc: warnings.append(str(exc))
+    output(state='timing_finalized',candidate_ended_at=stamp,report=str(path) if path else None,warnings=warnings)
 
 
 def sync(db, args):
@@ -434,10 +439,12 @@ def sync(db, args):
     digest = ledger.run_candidate_hash(db,args.run,args.candidate_id)
     row = db.execute("SELECT * FROM assessments WHERE run_id=? AND candidate_hash=?", (args.run, digest)).fetchone()
     if not row:
-        raise ValueError("assessment_missing")
+        output(state="sync_skipped", warnings=["评估记录尚未写入，不阻止继续"])
+        return
     candidate = db.execute("SELECT status FROM candidates WHERE candidate_hash=?", (digest,)).fetchone()
     if not candidate:
-        raise ValueError("ledger_status_missing")
+        output(state="sync_skipped", warnings=["发送记录尚未写入，不阻止继续"])
+        return
     status = candidate["status"]
     pdf_status = "pending" if status == "sent" else ("not_applicable" if status in ("skipped", "review", "not-sent") else row["pdf_status"])
     if row["evaluation_mode"]=="card" or not recruiting_rules.run_rules(run).get("pdf_required",True): pdf_status="not_applicable"
@@ -449,15 +456,20 @@ def sync(db, args):
     db.execute("""UPDATE assessments SET send_status=?,pdf_status=?,resume_archive_status=?,
         updated_at=?,report_written=0 WHERE run_id=? AND candidate_hash=?""",
                (status, pdf_status, resume_status, ledger.iso(ledger.now()), args.run, digest))
-    path = workbook(db, args.output_root, row["started_at"], profile_path=run["profile_path"])
-    db.execute("UPDATE assessments SET report_written=1 WHERE run_id=? AND candidate_hash=?", (args.run, digest))
-    output(state="synced", send_status=status, report=str(path))
+    path = None
+    warnings = []
+    try:
+        path = workbook(db, args.output_root, row["started_at"], profile_path=run["profile_path"])
+        report_batch.mark_written(db,args.run,digest)
+    except (OSError, ValueError) as exc:
+        warnings.append("表格待补写：" + str(exc))
+    output(state="synced", send_status=status, report=str(path) if path else None, warnings=warnings)
 
 
 def archive(db, args):
     run = ledger.run_row(db, args.run)
     _, _, fields = ledger.profile_check(Path(run["profile_path"]))
-    digest = ledger.candidate_hash(f"{fields['company']}-{fields['position']}", args.candidate_id)
+    digest = ledger.run_candidate_hash(db,args.run,args.candidate_id)
     row = db.execute("SELECT * FROM assessments WHERE run_id=? AND candidate_hash=?", (args.run, digest)).fetchone()
     if not row or row["send_status"] != "sent":
         raise ValueError("only confirmed sent candidate can be archived")
@@ -492,7 +504,7 @@ def archive(db, args):
     db.execute("UPDATE assessments SET pdf_status='saved',pdf_path=?,pdf_note='',updated_at=?,report_written=0 WHERE run_id=? AND candidate_hash=?",
                (str(target), ledger.iso(ledger.now()), args.run, digest))
     path = workbook(db, args.output_root, row["started_at"], profile_path=run["profile_path"])
-    db.execute("UPDATE assessments SET report_written=1 WHERE run_id=? AND candidate_hash=?", (args.run, digest))
+    report_batch.mark_written(db,args.run,digest)
     output(state="archived", pdf=str(target), report=str(path))
 
 
@@ -561,7 +573,7 @@ def archive_resume_files(
 def archive_resume(db, args):
     run = ledger.run_row(db, args.run)
     _, _, fields = ledger.profile_check(Path(run["profile_path"]))
-    digest = ledger.candidate_hash(f"{fields['company']}-{fields['position']}", args.candidate_id)
+    digest = ledger.run_candidate_hash(db,args.run,args.candidate_id)
     row = db.execute("SELECT * FROM assessments WHERE run_id=? AND candidate_hash=?", (args.run, digest)).fetchone()
     if not row:
         raise ValueError("assessment_missing")
@@ -582,7 +594,7 @@ def archive_resume(db, args):
                (image, text, json_path,
                 ledger.iso(ledger.now()), args.run, digest))
     path = workbook(db, args.output_root, row["started_at"], profile_path=run["profile_path"])
-    db.execute("UPDATE assessments SET report_written=1 WHERE run_id=? AND candidate_hash=?", (args.run, digest))
+    report_batch.mark_written(db,args.run,digest)
     output(state="resume_archived", image=image, ocr_text=text,
            ocr_json=json_path, report=str(path))
 
@@ -593,7 +605,7 @@ def missing_resume(db, args):
         digest = args.candidate_hash.lower()
     else:
         _, _, fields = ledger.profile_check(Path(run["profile_path"]))
-        digest = ledger.candidate_hash(f"{fields['company']}-{fields['position']}", args.candidate_id)
+        digest = ledger.run_candidate_hash(db,args.run,args.candidate_id)
     row = db.execute("SELECT * FROM assessments WHERE run_id=? AND candidate_hash=?", (args.run, digest)).fetchone()
     if not row:
         raise ValueError("assessment_missing")
@@ -604,14 +616,14 @@ def missing_resume(db, args):
         updated_at=?,report_written=0 WHERE run_id=? AND candidate_hash=?""",
                (args.reason.strip(), ledger.iso(ledger.now()), args.run, digest))
     path = workbook(db, args.output_root, row["started_at"], profile_path=run["profile_path"])
-    db.execute("UPDATE assessments SET report_written=1 WHERE run_id=? AND candidate_hash=?", (args.run, digest))
+    report_batch.mark_written(db,args.run,digest)
     output(state="resume_missing_recorded", report=str(path))
 
 
 def missing(db, args):
     run = ledger.run_row(db, args.run)
     _, _, fields = ledger.profile_check(Path(run["profile_path"]))
-    digest = ledger.candidate_hash(f"{fields['company']}-{fields['position']}", args.candidate_id)
+    digest = ledger.run_candidate_hash(db,args.run,args.candidate_id)
     row = db.execute("SELECT * FROM assessments WHERE run_id=? AND candidate_hash=?", (args.run, digest)).fetchone()
     if not row or row["send_status"] != "sent":
         raise ValueError("only confirmed sent candidate can have missing PDF")
@@ -620,7 +632,7 @@ def missing(db, args):
     db.execute("UPDATE assessments SET pdf_status='missing',pdf_path=NULL,pdf_note=?,updated_at=?,report_written=0 WHERE run_id=? AND candidate_hash=?",
                (args.reason.strip(), ledger.iso(ledger.now()), args.run, digest))
     path = workbook(db, args.output_root, row["started_at"], profile_path=run["profile_path"])
-    db.execute("UPDATE assessments SET report_written=1 WHERE run_id=? AND candidate_hash=?", (args.run, digest))
+    report_batch.mark_written(db,args.run,digest)
     output(state="pdf_missing_recorded", report=str(path))
 
 
@@ -657,10 +669,7 @@ def record_coworker_skip(db, args):
     result = coworker_progress.evaluate(observation, ledger.now())
     if not result["skip"]:
         raise ValueError("coworker_skip_requires_first_greeting_older_than_7_days")
-    active = ledger.active_progress(db, args.run)
-    digest = ledger.run_candidate_hash(db, args.run, args.candidate_id)
-    if not active or active["candidate_hash"] != digest:
-        raise ValueError("candidate_not_active")
+    active = ledger.ensure_candidate(db, args.run, args.candidate_id)
     # The schema keeps an integer sentinel; both report sheets display this as unscored.
     record(db, args, payload={
         "candidate_id": args.candidate_id, "candidate_name": args.candidate_name,
@@ -702,14 +711,21 @@ def rebuild(db, args):
         paths.append(str(path))
         if not args.output_file:
             for item in group:
-                db.execute("UPDATE assessments SET report_written=1 WHERE run_id=? AND candidate_hash=?",
-                           (item["run_id"], item["candidate_hash"]))
+                report_batch.mark_written(db,item["run_id"],item["candidate_hash"])
     output(state="rebuilt", report=paths[0], reports=paths)
 
 
 def message_summary(db,row):
-    attempts=db.execute("SELECT message_index,status FROM message_attempts WHERE run_id=? AND candidate_hash=? ORDER BY message_index",(row["run_id"],row["candidate_hash"])).fetchall()
-    return "；".join(f"第{a[0]}句:{a[1]}" for a in attempts) or row["send_status"]
+    attempts=attempt_rows(db,row['run_id'],row['candidate_hash'])
+    return "；".join(f"第{a['message_index']}句:{a['status']}" for a in attempts) or row["send_status"]
+
+
+def attempt_rows(db,run_id,digest):
+    history=db.execute("SELECT 1 FROM sqlite_master WHERE name='message_attempt_history'").fetchone()
+    rows=[]
+    if history:rows.extend(dict(row) for row in db.execute('SELECT * FROM message_attempt_history WHERE run_id=? AND candidate_hash=? ORDER BY created_at,rowid',(run_id,digest)))
+    rows.extend(dict(row) for row in db.execute('SELECT * FROM message_attempts WHERE run_id=? AND candidate_hash=? ORDER BY message_index',(run_id,digest)))
+    return sorted(rows,key=lambda row:(row['created_at'],row['message_index']))
 
 def archive_card_files(root,started_at,name,digest,payload):
     from PIL import Image

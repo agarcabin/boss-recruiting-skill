@@ -1,3 +1,5 @@
+> 1.0.12：运行控制以[control-policy.md](control-policy.md)为准；下文历史时间/额度、审核阻塞、强制OCR、未决核销及逐动作门禁不再生效。
+
 > 2026-10-27现行口径：先按 [evaluation-modes.md](evaluation-modes.md) 分流。card不打开电子简历、不做OCR及详情同事检查；resume保留下文对应流程。所有外部动作经safe_action.py，不裸调用UIA Invoke/按键/鼠标；历史示例仅作底层技术参考。
 
 # 岗位标准化文件格式 v1
@@ -13,10 +15,13 @@ source_root: 原始企业资料文件夹的绝对路径
 approval: pending
 approved_by:
 approved_at:
+greeting_mode: single
 ---
 ```
 
 正文固定包含这些二级标题：
+
+`greeting_mode` 可取 `single`（默认单次）或 `triple`（三连式）；也可放在独立 `project.json`。缺省按single，具体优先级和运行快照兼容见 [招呼方式开关](greeting-modes.md)。固定招呼话术保留完整三句，single只使用平台默认首句，不执行第二三句。
 
 - `## 页面核验`：执行前必须从当前页面确认的企业、岗位、城市；资料缺失时说明。
 - `## 企业与岗位事实`：职责、办公地、薪酬和其他经资料支持的信息，并标出不能承诺的细节。

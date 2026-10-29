@@ -6,7 +6,6 @@ import argparse
 import hashlib
 import json
 import os
-import random
 import re
 import sqlite3
 import sys
@@ -15,6 +14,7 @@ import uuid
 import coworker_progress
 import recruiting_rules
 import run_safety
+import run_targets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -25,8 +25,8 @@ except (AttributeError, OSError):
     pass
 
 
-MAX_ROLLING_SENDS = 150
-MAX_RUN_VIEWS = 300
+DEFAULT_TARGET = 150
+DEFAULT_MAX_VIEWS = 300
 DEFAULT_DB = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "Codex" / "recruiting-greetings" / "ledger.sqlite3"
 PROFILE_ROOT = Path(__file__).resolve().parents[1] / "profiles"
 
@@ -120,6 +120,13 @@ def connect(db_path: Path) -> sqlite3.Connection:
     if "paused_seconds" not in control_columns:
         db.execute("ALTER TABLE run_control ADD COLUMN paused_seconds INTEGER NOT NULL DEFAULT 0")
     run_safety.migrate(db)
+    columns = {row[1] for row in db.execute("PRAGMA table_info(runs)")}
+    if "max_views" not in columns:
+        db.execute("ALTER TABLE runs ADD COLUMN max_views INTEGER NOT NULL DEFAULT 300")
+    db.executescript("""CREATE TABLE IF NOT EXISTS candidate_visits (
+        run_id TEXT NOT NULL, candidate_id TEXT NOT NULL, candidate_hash TEXT NOT NULL,
+        ordinal INTEGER NOT NULL, PRIMARY KEY(run_id,candidate_hash));
+        CREATE INDEX IF NOT EXISTS visits_candidate ON candidate_visits(run_id,candidate_id,ordinal);""")
     return db
 
 
@@ -140,16 +147,16 @@ def profile_check(path: Path) -> tuple[bool, str, dict[str, str]]:
     if not fields.get("company") or not fields.get("position"):
         return False, "identity_missing", fields
     if fields.get("approval") != "approved" or not fields.get("approved_by") or not fields.get("approved_at"):
-        return False, "approval_missing", fields
+        fields["_warnings"] = "岗位未审核，仅提醒，不阻止运行"
     required_sections = ("页面核验", "企业与岗位事实", "自动筛选条件", "评分规则", "加分项", "待人工确认", "固定招呼话术", "冲突与待确认", "来源")
     if any(f"## {title}" not in content for title in required_sections):
-        return False, "required_section_missing", fields
+        fields["_warnings"] = fields.get("_warnings", "") + "; 岗位章节不完整"
     if re.search(r"(?m)^\s*-\s*\[\s*\]", content):
-        return False, "unresolved_conflicts", fields
+        fields["_warnings"] = fields.get("_warnings", "") + "; 岗位配置存在未解决事项"
     for title in ("页面核验", "企业与岗位事实", "自动筛选条件", "评分规则", "固定招呼话术"):
         section = re.search(rf"(?ms)^## {title}\s*\n(.*?)(?=^## |\Z)", content)
         if section and re.search(r"待确认|尚未确认|待审核|需确认|未决", section.group(1)):
-            return False, "unresolved_policy_text", fields
+            fields["_warnings"] = fields.get("_warnings", "") + "; 岗位内容有待确认事项"
     greeting = re.search(r"(?ms)^## 固定招呼话术\s*\n(.*?)(?=^## |\Z)", content)
     if not greeting or len(greeting.group(1).strip()) < 10:
         return False, "greeting_missing", fields
@@ -234,10 +241,6 @@ def control(db: sqlite3.Connection, args: argparse.Namespace) -> None:
         if args.action == "login-confirmed" and before == "login_required":
             if not getattr(args, "manual_confirmed", False):
                 after, reason = before, "manual_login_confirmation_required"
-            elif at >= parse_time(run_row(db, args.run)["deadline_at"]):
-                after, reason = before, "run_expired"
-            elif unresolved(db):
-                after, reason = before, "unresolved_prior_send"
         if after != before:
             if before == "running" and after in ("paused", "login_required"):
                 paused_at = iso(at)
@@ -268,8 +271,6 @@ def control(db: sqlite3.Connection, args: argparse.Namespace) -> None:
 
 def gate(db: sqlite3.Connection, args: argparse.Namespace) -> None:
     state = control_state(db, args.run)
-    if state != "stopped" and now() >= parse_time(run_row(db, args.run)["deadline_at"]):
-        state = "expired"
     reason = run_safety.quantity_reason(db, args.run) if state == "running" else None
     active = active_progress(db, args.run)
     output(state="draining" if reason and active and state == "running" else state,
@@ -278,10 +279,36 @@ def gate(db: sqlite3.Connection, args: argparse.Namespace) -> None:
            generation=run_row(db,args.run)["generation"])
 
 
-def run_candidate_hash(db: sqlite3.Connection, run_id: str, candidate_id: str) -> str:
+def run_candidate_hash(db, run_id, candidate_id):
+    row = db.execute("SELECT candidate_hash FROM candidate_visits WHERE run_id=? AND candidate_id=? ORDER BY ordinal DESC LIMIT 1", (run_id, candidate_id)).fetchone()
+    if row:
+        return row[0]
     run = run_row(db, run_id)
-    _, _, fields = profile_check(Path(run["profile_path"]))
-    return candidate_hash(run_namespace(run, fields), candidate_id)
+    return candidate_hash(run_namespace(run), candidate_id)
+
+
+def ensure_candidate(db, run_id, candidate_id, started_at=None, new_visit=False):
+    """Accounting is automatic; a previous visit is never an exclusion rule."""
+    active = active_progress(db, run_id)
+    digest = run_candidate_hash(db, run_id, candidate_id)
+    if active and active['candidate_hash'] == digest and not new_visit:
+        return active
+    stamp = iso(now())
+    if active:
+        db.execute("UPDATE candidate_progress SET finished_at=? WHERE run_id=? AND candidate_hash=?", (stamp, run_id, active['candidate_hash']))
+        db.execute("INSERT INTO run_audit(run_id,at,event,detail) VALUES (?,?,?,?)", (run_id,stamp,'candidate_auto_closed','next candidate; optional report/timing may be incomplete'))
+    reason = run_safety.quantity_reason(db, run_id)
+    if reason:
+        raise ValueError(reason)
+    ordinal = db.execute("SELECT COALESCE(MAX(ordinal),0)+1 FROM candidate_progress WHERE run_id=?", (run_id,)).fetchone()[0]
+    digest = uuid.uuid4().hex + uuid.uuid4().hex
+    try:
+        started = iso(parse_timestamp_argument(started_at, now()))
+    except (ValueError, TypeError):
+        started = stamp
+    db.execute("INSERT INTO candidate_visits VALUES (?,?,?,?)", (run_id,candidate_id,digest,ordinal))
+    db.execute("INSERT INTO candidate_progress VALUES (?,?,?,?,?,?)", (run_id,digest,ordinal,started,None,None))
+    return active_progress(db,run_id)
 
 
 def run_namespace(run, fields=None):
@@ -296,160 +323,54 @@ def active_progress(db: sqlite3.Connection, run_id: str) -> sqlite3.Row | None:
     return db.execute("SELECT * FROM candidate_progress WHERE run_id=? AND finished_at IS NULL", (run_id,)).fetchone()
 
 
-def candidate_begin(db: sqlite3.Connection, args: argparse.Namespace) -> None:
-    at = now()
-    db.execute("BEGIN IMMEDIATE")
-    try:
-        run = run_row(db, args.run)
-        started_at = parse_timestamp_argument(getattr(args, "started_at", None), at)
-        if started_at > at + timedelta(seconds=5):
-            result = {"state": "blocked", "reason": "candidate_start_in_future"}
-            db.commit()
-            output(**result)
-            return
-        if started_at < parse_time(run["started_at"]):
-            result = {"state": "blocked", "reason": "candidate_start_before_run"}
-            db.commit()
-            output(**result)
-            return
-        digest = run_candidate_hash(db, args.run, args.candidate_id)
-        active = active_progress(db, args.run)
-        existing = db.execute("SELECT * FROM candidate_progress WHERE run_id=? AND candidate_hash=?", (args.run, digest)).fetchone()
-        if at >= parse_time(run["deadline_at"]):
-            result = {"state": "blocked", "reason": "run_expired"}
-        elif control_state(db, args.run) != "running":
-            result = {"state": "blocked", "reason": "run_" + control_state(db, args.run)}
-        elif not existing and run_safety.quantity_reason(db,args.run):
-            result = {"state":"blocked", "reason":run_safety.quantity_reason(db,args.run)}
-        elif active and active["candidate_hash"] != digest:
-            result = {"state": "blocked", "reason": "another_candidate_active", "current_candidate_number": active["ordinal"]}
-        elif not existing and db.execute("SELECT COUNT(*) FROM candidate_progress WHERE run_id=?", (args.run,)).fetchone()[0] >= MAX_RUN_VIEWS:
-            result = {"state": "blocked", "reason": "run_view_limit_reached"}
-        elif existing and existing["finished_at"]:
-            result = {"state": "blocked", "reason": "candidate_already_finished", "current_candidate_number": existing["ordinal"]}
-        elif existing:
-            result = {"state": "resumed", "current_candidate_number": existing["ordinal"], "candidate_started_at": existing["started_at"]}
-        elif db.execute("SELECT 1 FROM candidates WHERE candidate_hash=?", (digest,)).fetchone():
-            result = {"state": "blocked", "reason": "candidate_seen"}
-        else:
-            ordinal = db.execute("SELECT COALESCE(MAX(ordinal),0)+1 FROM candidate_progress WHERE run_id=?", (args.run,)).fetchone()[0]
-            db.execute("INSERT INTO candidate_progress VALUES (?,?,?,?,?,?)", (args.run, digest, ordinal, iso(started_at), None, None))
-            result = {"state": "started_candidate", "current_candidate_number": ordinal, "candidate_started_at": iso(started_at)}
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    output(**result)
+def candidate_begin(db, args):
+    active = ensure_candidate(db,args.run,args.candidate_id,getattr(args,'started_at',None),getattr(args,'new_visit',False))
+    output(state='started_candidate',current_candidate_number=active['ordinal'],candidate_started_at=active['started_at'])
 
 
-def electronic_opened(db: sqlite3.Connection, args: argparse.Namespace) -> None:
-    if run_row(db,args.run)['evaluation_mode']=='card':
-        output(state='blocked',reason='electronic_resume_not_applicable')
-        return
-    at = now()
-    digest = run_candidate_hash(db, args.run, args.candidate_id)
-    active = active_progress(db, args.run)
-    if not active or active["candidate_hash"] != digest:
-        output(state="blocked", reason="candidate_not_active")
-        return
-    db.execute("UPDATE candidate_progress SET electronic_opened_at=COALESCE(electronic_opened_at,?) WHERE run_id=? AND candidate_hash=?", (iso(at), args.run, digest))
-    count = db.execute("SELECT COUNT(*) FROM candidate_progress WHERE run_id=? AND electronic_opened_at IS NOT NULL", (args.run,)).fetchone()[0]
-    output(state="electronic_opened", current_candidate_number=active["ordinal"], electronic_resume_opened_candidates=count)
+def electronic_opened(db, args):
+    active = ensure_candidate(db,args.run,args.candidate_id)
+    db.execute("UPDATE candidate_progress SET electronic_opened_at=COALESCE(electronic_opened_at,?) WHERE run_id=? AND candidate_hash=?",(iso(now()),args.run,active['candidate_hash']))
+    output(state='electronic_opened',current_candidate_number=active['ordinal'])
 
 
-def candidate_finish(db: sqlite3.Connection, args: argparse.Namespace) -> None:
-    digest = run_candidate_hash(db, args.run, args.candidate_id)
-    active = active_progress(db, args.run)
-    if not active or active["candidate_hash"] != digest:
-        output(state="blocked", reason="candidate_not_active")
+def candidate_finish(db,args):
+    digest = run_candidate_hash(db,args.run,args.candidate_id)
+    row = db.execute("SELECT * FROM candidate_progress WHERE run_id=? AND candidate_hash=?",(args.run,digest)).fetchone()
+    if row is None:
+        output(state='finished_candidate',warnings=['没有候选人登记；已略过可选收尾'])
         return
-    assessment_columns = (
-        {row["name"] for row in db.execute("PRAGMA table_info(assessments)").fetchall()}
-        if db.execute("SELECT 1 FROM sqlite_master WHERE name='assessments'").fetchone()
-        else set()
-    )
-    resume_status_sql = (
-        "resume_archive_status"
-        if "resume_archive_status" in assessment_columns
-        else "'pending' AS resume_archive_status"
-    )
-    assessment = db.execute(
-        f"SELECT send_status,pdf_status,{resume_status_sql},report_written,ended_at,evaluation_mode "
-        "FROM assessments WHERE run_id=? AND candidate_hash=?",
-        (args.run, digest),
-    ).fetchone() if assessment_columns else None
-    candidate = db.execute("SELECT status FROM candidates WHERE candidate_hash=?", (digest,)).fetchone()
-    if candidate and candidate['status']=='sent' and recruiting_rules.run_rules(run_row(db,args.run)).get('policy','legacy')!='legacy':
-        sent_messages={r[0] for r in db.execute("SELECT message_index FROM message_attempts WHERE run_id=? AND candidate_hash=? AND status='sent'",(args.run,digest))}
-        if sent_messages!={1,2,3}:
-            output(state='blocked',reason='greeting_messages_incomplete')
-            return
-    if (
-        not assessment
-        or not candidate
-        or not assessment["report_written"]
-        or assessment["send_status"] != candidate["status"]
-        or candidate["status"] in ("pending", "unknown")
-        or (
-            candidate["status"] == "sent"
-            and (
-                (assessment["pdf_status"] not in ("saved", "missing") and not (assessment["pdf_status"]=="not_applicable" and (assessment["evaluation_mode"]=="card" or not recruiting_rules.run_rules(run_row(db,args.run)).get("pdf_required",True))))
-                or (assessment["evaluation_mode"] != "card" and assessment["resume_archive_status"] not in ("saved", "missing"))
-            )
-        )
-    ):
-        output(state="blocked", reason="candidate_workflow_incomplete")
-        return
-    if not assessment["ended_at"]:
-        output(state="blocked", reason="candidate_timing_pending")
-        return
-    at = now()
-    ended_at = parse_time(assessment["ended_at"])
-    requested_end = getattr(args, "ended_at", None)
-    if requested_end and iso(parse_time(requested_end)) != iso(ended_at):
-        output(state="blocked", reason="candidate_end_mismatch")
-        return
-    if ended_at > at + timedelta(seconds=5):
-        output(state="blocked", reason="candidate_end_in_future")
-        return
-    if ended_at < parse_time(active["started_at"]):
-        output(state="blocked", reason="candidate_end_before_start")
-        return
-    db.execute("UPDATE candidate_progress SET finished_at=? WHERE run_id=? AND candidate_hash=?", (iso(ended_at), args.run, digest))
-    output(state="finished_candidate", current_candidate_number=active["ordinal"], candidate_ended_at=iso(ended_at))
+    stamp = iso(now())
+    supplied = getattr(args,'ended_at',None)
+    if supplied:
+        try: stamp = iso(parse_time(supplied))
+        except (ValueError,TypeError): pass
+    db.execute("UPDATE candidate_progress SET finished_at=COALESCE(finished_at,?) WHERE run_id=? AND candidate_hash=?",(stamp,args.run,digest))
+    output(state='finished_candidate',current_candidate_number=row['ordinal'],candidate_ended_at=stamp)
 
 
-def start(db: sqlite3.Connection, args: argparse.Namespace) -> None:
+def start(db,args):
     path = Path(args.profile).resolve()
     if not path.is_relative_to(PROFILE_ROOT.resolve()):
-        output(state="blocked", reason="profile_outside_skill_profiles")
-        return
-    ok, reason, fields = profile_check(path)
+        output(state='blocked',reason='profile_outside_skill_profiles'); return
+    ok,reason,fields = profile_check(path)
     if not ok:
-        output(state="blocked", reason=reason)
-        return
-    rules = recruiting_rules.snapshot(path,fields)
+        output(state='blocked',reason=reason); return
+    target,views=run_targets.resolve(getattr(args,'target',None),getattr(args,'max_views',None))
+    if not isinstance(target,int) or target < 1 or not isinstance(views,int) or views < 1 or not 0 <= args.min_score <= 100:
+        raise ValueError('target/max_views must be positive integers; min_score 0..100')
+    rules = recruiting_rules.snapshot(path,fields,getattr(args,'greeting_mode',None))
     binding = None
-    if rules["policy"] != "legacy":
+    warnings = [fields['_warnings']] if fields.get('_warnings') else []
+    if getattr(args,'stop_binding',None):
         import stop_controller
-        binding_path = getattr(args,"stop_binding",None)
-        if not binding_path:
-            output(state="blocked",reason="stop_binding_required")
-            return
-        binding = stop_controller.load_binding(Path(binding_path))
-        stop_controller.probe_binding(binding)
-    if not 1 <= args.target <= MAX_ROLLING_SENDS or not 1 <= args.duration_min <= 240 or not 0 <= args.min_score <= 100:
-        raise ValueError("target 1..150, duration_min 1..240, min_score 0..100 required")
-    if unresolved(db):
-        output(state="blocked", reason="unresolved_prior_send")
-        return
-    at = now()
-    run_id = uuid.uuid4().hex
-    db.execute("INSERT INTO runs (run_id,started_at,deadline_at,target,profile_path,profile_hash,min_score) VALUES (?,?,?,?,?,?,?)", (run_id, iso(at), iso(at + timedelta(minutes=args.duration_min)), args.target, str(path), profile_hash(path), args.min_score))
-    db.execute("UPDATE runs SET candidate_namespace=?,evaluation_mode=?,rule_snapshot=?,stop_binding=? WHERE run_id=?",
-               (rules["namespace"],rules["mode"],json.dumps(rules,ensure_ascii=False),json.dumps(binding) if binding else None,run_id))
-    db.execute("INSERT INTO run_control (run_id,state,updated_at) VALUES (?,?,?)", (run_id, "running", iso(at)))
-    output(state="started", run_id=run_id, company=fields["company"], position=fields["position"], min_score=args.min_score, deadline_at=iso(at + timedelta(minutes=args.duration_min)))
+        try: binding = stop_controller.load_binding(Path(args.stop_binding))
+        except (ValueError,OSError) as exc: warnings.append('optional stop binding: '+str(exc))
+    at = iso(now()); run_id = uuid.uuid4().hex
+    db.execute("INSERT INTO runs(run_id,started_at,deadline_at,target,profile_path,profile_hash,min_score,max_views) VALUES (?,?,?,?,?,?,?,?)",(run_id,at,'',target,str(path),profile_hash(path),args.min_score,views))
+    db.execute("UPDATE runs SET candidate_namespace=?,evaluation_mode=?,rule_snapshot=?,stop_binding=? WHERE run_id=?",(rules['namespace'],rules['mode'],json.dumps(rules,ensure_ascii=False),json.dumps(binding) if binding else None,run_id))
+    db.execute("INSERT INTO run_control(run_id,state,updated_at) VALUES (?,?,?)",(run_id,'running',at))
+    output(state='started',run_id=run_id,company=fields['company'],position=fields['position'],greeting_mode=rules['greeting_mode'],min_score=args.min_score,target=target,max_views=views,deadline_at=None,warnings=warnings,chat_title=f"{fields['company']} {fields['position']} - {now().astimezone(timezone(timedelta(hours=8))).date().isoformat()}",startup_actions=['set_current_chat_title','collapse_chat_sidebar','confirm_login_prompt_if_present'])
 
 
 def status(db: sqlite3.Connection, args: argparse.Namespace) -> None:
@@ -466,16 +387,14 @@ def status(db: sqlite3.Connection, args: argparse.Namespace) -> None:
         if active:
             assessed = db.execute("SELECT 1 FROM assessments WHERE run_id=? AND candidate_hash=?", (args.run, active["candidate_hash"])).fetchone() if db.execute("SELECT 1 FROM sqlite_master WHERE name='assessments'").fetchone() else None
             current_stage = "post_assessment" if assessed else "judging"
-        details = {"run_id": args.run, "target": row["target"], "min_score": row["min_score"],
+        details = {"run_id": args.run, "target": row["target"], "min_score": row["min_score"], "greeting_mode": recruiting_rules.run_greeting_mode(row),
                    "run_state": control_state(db, args.run),
-                   "started_at": row["started_at"], "deadline_at": row["deadline_at"], "run_expired": at >= parse_time(row["deadline_at"]),
+                   "started_at": row["started_at"], "deadline_at": row["deadline_at"], "run_expired": False,
                    "elapsed_seconds": elapsed, "elapsed_display": f"{elapsed // 3600:02d}:{elapsed % 3600 // 60:02d}:{elapsed % 60:02d}",
                    "current_candidate_number": active["ordinal"] if active else None, "current_stage": current_stage,
-                   "candidates_started": progress["started"], "candidates_completed": progress["finished"], "view_remaining": max(0, MAX_RUN_VIEWS-progress["started"]),
+                   "candidates_started": progress["started"], "candidates_completed": progress["finished"], "view_remaining": max(0, row["max_views"]-progress["started"]),
                    "electronic_resume_opened_candidates": progress["electronic_opened"], "greetings_sent": counts.get("sent", 0)}
-    next_row = db.execute("SELECT value FROM settings WHERE key='next_allowed_at'").fetchone()
-    next_at = parse_time(next_row[0]) if next_row else None
-    output(state="status", rolling_sent=rolling_count(db, at), rolling_remaining=MAX_ROLLING_SENDS - rolling_count(db, at), unresolved=unresolved(db), next_allowed_at=iso(next_at) if next_at else None, counts=counts, **details)
+    output(state="status", rolling_sent=rolling_count(db, at), rolling_remaining=None, unresolved=unresolved(db), next_allowed_at=None, counts=counts, **details)
 
 
 def recent_runs(db: sqlite3.Connection, args: argparse.Namespace) -> None:
@@ -499,7 +418,7 @@ def recent_runs(db: sqlite3.Connection, args: argparse.Namespace) -> None:
             metadata = {}
         company = str(fields.get("company") or metadata.get("company") or "")
         position = str(fields.get("position") or metadata.get("position") or "")
-        expired = at >= parse_time(row["deadline_at"])
+        expired = False
         state = "expired" if expired else control_state(db, row["run_id"])
         counts = {item["status"]: item["n"] for item in db.execute(
             "SELECT status, COUNT(*) AS n FROM candidates WHERE run_id=? GROUP BY status", (row["run_id"],)
@@ -544,180 +463,87 @@ def watch(db: sqlite3.Connection, args: argparse.Namespace) -> None:
                 current = "无"
             state = control_state(db, args.run)
             print(f"状态 {state} | 已运行 {elapsed // 3600:02d}:{elapsed % 3600 // 60:02d}:{elapsed % 60:02d} | 当前处理 {current} | 已打开电子简历 {electronic} 人 | 成功打招呼 {sent} 次", flush=True)
-            if state == "stopped" or (at >= parse_time(run["deadline_at"]) and not active):
+            if state == "stopped":
                 return
             time.sleep(args.interval)
     except KeyboardInterrupt:
         return
 
 
-def reserve(db: sqlite3.Connection, args: argparse.Namespace) -> None:
-    at = now()
-    db.execute("BEGIN IMMEDIATE")
-    try:
-        run = run_row(db, args.run)
-        path = Path(run["profile_path"])
-        ok, reason, fields = profile_check(path)
-        project = run_namespace(run, fields)
-        digest = candidate_hash(project, args.candidate_id)
-        has_assessments = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='assessments'").fetchone()
-        assessment_columns = (
-            {row["name"] for row in db.execute("PRAGMA table_info(assessments)").fetchall()}
-            if has_assessments else set()
-        )
-        override_expr = "hard_requirement_override" if "hard_requirement_override" in assessment_columns else "'false' AS hard_requirement_override"
-        coworker_expr = "coworker_progress" if "coworker_progress" in assessment_columns else "NULL AS coworker_progress"
-        assessment = (db.execute(f"SELECT decision,overall_score,hard_requirements,{override_expr},send_status,pdf_status,report_written,evaluation_mode,eligibility_json,evaluation_input,{coworker_expr} FROM assessments WHERE run_id=? AND candidate_hash=?", (args.run, digest)).fetchone()
-                      if has_assessments else None)
-        try:
-            coworker_check = coworker_progress.evaluate(
-                json.loads(assessment["coworker_progress"] or "{}") if assessment else None, at)
-        except (ValueError, TypeError):
-            coworker_check = coworker_progress.evaluate(None, at)
-        unsynced = (db.execute("""SELECT 1 FROM candidates c JOIN assessments a ON a.candidate_hash=c.candidate_hash
-            WHERE a.send_status<>c.status LIMIT 1""").fetchone() if has_assessments else None)
-        unwritten = (db.execute("SELECT 1 FROM assessments WHERE report_written=0 LIMIT 1").fetchone() if has_assessments else None)
-        if "resume_archive_status" in assessment_columns:
-            resume_unarchived = db.execute(
-                "SELECT 1 FROM assessments WHERE send_status='sent' "
-                "AND resume_archive_status='pending' AND evaluation_mode<>'card' LIMIT 1"
-            ).fetchone()
-        else:
-            resume_unarchived = (
-                db.execute("SELECT 1 FROM assessments WHERE send_status='sent' LIMIT 1").fetchone()
-                if has_assessments else None
-            )
-        pdf_unarchived = (
-            db.execute(
-                "SELECT 1 FROM assessments WHERE send_status='sent' AND pdf_status='pending' AND evaluation_mode<>'card' LIMIT 1"
-            ).fetchone()
-            if has_assessments else None
-        )
-        if not ok:
-            result = {"state": "blocked", "reason": reason}
-        elif profile_hash(path) != run["profile_hash"]:
-            result = {"state": "blocked", "reason": "profile_changed_since_start"}
-        elif at >= parse_time(run["deadline_at"]):
-            result = {"state": "blocked", "reason": "run_expired"}
-        elif control_state(db, args.run) != "running":
-            result = {"state": "blocked", "reason": "run_" + control_state(db, args.run)}
-        elif unresolved(db):
-            result = {"state": "blocked", "reason": "unresolved_prior_send"}
-        elif unsynced:
-            result = {"state": "blocked", "reason": "report_not_synced"}
-        elif unwritten:
-            result = {"state": "blocked", "reason": "report_not_written"}
-        elif resume_unarchived:
-            result = {"state": "blocked", "reason": "resume_archive_pending"}
-        elif pdf_unarchived:
-            result = {"state": "blocked", "reason": "pdf_archive_pending"}
-        elif db.execute("SELECT 1 FROM candidates WHERE candidate_hash=?", (digest,)).fetchone():
-            result = {"state": "blocked", "reason": "candidate_seen"}
-        elif not active_progress(db, args.run) or active_progress(db, args.run)["candidate_hash"] != digest:
-            result = {"state": "blocked", "reason": "candidate_not_active"}
-        elif not assessment:
-            result = {"state": "blocked", "reason": "assessment_missing"}
-        elif assessment["decision"] != "greet" or not assessment_eligible(run,assessment) or assessment["send_status"] != "assessed" or not assessment["report_written"]:
-            result = {"state": "blocked", "reason": "assessment_not_eligible"}
-        elif assessment["evaluation_mode"] != "card" and not coworker_check["may_continue"]:
-            result = {"state": "blocked", "reason": coworker_check["reason"]}
-        elif db.execute("SELECT COUNT(*) FROM candidates WHERE run_id=? AND status='sent'", (args.run,)).fetchone()[0] >= run["target"]:
-            result = {"state": "blocked", "reason": "run_target_reached"}
-        elif rolling_count(db, at) >= MAX_ROLLING_SENDS:
-            result = {"state": "blocked", "reason": "rolling_limit_reached"}
-        else:
-            next_row = db.execute("SELECT value FROM settings WHERE key='next_allowed_at'").fetchone()
-            next_at = parse_time(next_row[0]) if next_row else None
-            if next_at and at < next_at:
-                result = {"state": "wait", "until": iso(next_at), "seconds": max(1, int((next_at - at).total_seconds() + 0.999))}
-            else:
-                token = uuid.uuid4().hex
-                db.execute("INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?)", (digest, project, args.run, "pending", token, iso(at), None, iso(at)))
-                db.execute("INSERT INTO message_attempts VALUES (?,?,?,?,?,?,?,?)", (token,args.run,digest,1,"pending",run["generation"],iso(at),iso(at)))
-                result = {"state": "ready", "token": token}
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    output(**result)
+def reserve(db,args):
+    run = run_row(db,args.run)
+    ok,reason,fields = profile_check(Path(run['profile_path']))
+    if not ok:
+        output(state='blocked',reason=reason); return
+    if profile_hash(Path(run['profile_path'])) != run['profile_hash']:
+        output(state='blocked',reason='profile_changed_since_start'); return
+    digest = run_candidate_hash(db,args.run,args.candidate_id)
+    exists = db.execute("SELECT 1 FROM sqlite_master WHERE name='assessments'").fetchone()
+    assessment = db.execute("SELECT * FROM assessments WHERE run_id=? AND candidate_hash=?",(args.run,digest)).fetchone() if exists else None
+    if not assessment or assessment['decision']!='greet' or not assessment_eligible(run,assessment):
+        output(state='blocked',reason='assessment_not_eligible'); return
+    if assessment['evaluation_mode']!='card':
+        coworker = coworker_progress.evaluate(json.loads(assessment['coworker_progress'] or '{}'),now())
+        if not coworker['may_continue']:
+            output(state='blocked',reason=coworker['reason']); return
+    if db.execute("SELECT COUNT(*) FROM candidates WHERE run_id=? AND status='sent'",(args.run,)).fetchone()[0] >= run['target']:
+        output(state='blocked',reason='run_target_reached'); return
+    previous=db.execute('SELECT * FROM candidates WHERE candidate_hash=?',(digest,)).fetchone()
+    if previous and previous['status']=='sent':
+        output(state='already_sent',token=previous['token']);return
+    if previous and previous['status']=='pending':
+        output(state='ready',token=previous['token'],reused=True);return
+    token=uuid.uuid4().hex;stamp=iso(now())
+    if previous:
+        db.execute("""CREATE TABLE IF NOT EXISTS message_attempt_history (
+            token TEXT PRIMARY KEY,run_id TEXT NOT NULL,candidate_hash TEXT NOT NULL,
+            message_index INTEGER NOT NULL,status TEXT NOT NULL,generation INTEGER NOT NULL,
+            created_at TEXT NOT NULL,updated_at TEXT NOT NULL)""")
+        db.execute('CREATE INDEX IF NOT EXISTS attempt_history_candidate ON message_attempt_history(candidate_hash,message_index,created_at)')
+        db.execute('INSERT OR IGNORE INTO message_attempt_history SELECT * FROM message_attempts WHERE run_id=? AND candidate_hash=? AND message_index=1',(args.run,digest))
+        db.execute("UPDATE candidates SET status='pending',token=?,updated_at=? WHERE candidate_hash=?",(token,stamp,digest))
+    else:
+        db.execute('INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?)',(digest,run_namespace(run,fields),args.run,'pending',token,stamp,None,stamp))
+    db.execute('INSERT INTO message_attempts VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(run_id,candidate_hash,message_index) DO UPDATE SET token=excluded.token,status=excluded.status,created_at=excluded.created_at,updated_at=excluded.updated_at',(token,args.run,digest,1,'pending',run['generation'],stamp,stamp))
+    output(state='ready',token=token,warnings=[fields['_warnings']] if fields.get('_warnings') else [])
 
 
-def resolve(db: sqlite3.Connection, args: argparse.Namespace) -> None:
-    if not 60 <= args.min_gap <= args.max_gap <= 600:
-        raise ValueError("min_gap/max_gap must satisfy 60 <= min <= max <= 600")
-    at = now()
-    db.execute("BEGIN IMMEDIATE")
-    try:
-        row = db.execute("SELECT status FROM candidates WHERE token=?", (args.token,)).fetchone()
-        if row is None or row["status"] != "pending":
-            result = {"state": "blocked", "reason": "reservation_not_pending"}
-        else:
-            sent_at = iso(at) if args.result == "sent" else None
-            db.execute("UPDATE candidates SET status=?, sent_at=?, updated_at=? WHERE token=?", (args.result, sent_at, iso(at), args.token))
-            db.execute("UPDATE message_attempts SET status=?,updated_at=? WHERE token=?",(args.result,iso(at),args.token))
-            if args.result == "sent":
-                gap = random.SystemRandom().uniform(args.min_gap, args.max_gap)
-                next_allowed = iso(at + timedelta(seconds=gap))
-                db.execute("INSERT INTO settings VALUES ('next_allowed_at', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (next_allowed,))
-                result = {"state": "sent", "next_allowed_at": next_allowed, "rolling_sent": rolling_count(db, at)}
-            else:
-                result = {"state": args.result, "requires_manual_reconciliation": args.result == "unknown"}
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    output(**result)
+def resolve(db,args):
+    row=db.execute('SELECT * FROM message_attempts WHERE token=?',(args.token,)).fetchone()
+    history_exists=db.execute("SELECT 1 FROM sqlite_master WHERE name='message_attempt_history'").fetchone()
+    historical=False
+    if row is None and history_exists:
+        row=db.execute('SELECT * FROM message_attempt_history WHERE token=?',(args.token,)).fetchone();historical=bool(row)
+    if row is None:
+        output(state='not_found',reason='record_not_found');return
+    stamp=iso(now());table='message_attempt_history' if historical else 'message_attempts'
+    db.execute('UPDATE '+table+' SET status=?,updated_at=? WHERE token=?',(args.result,stamp,args.token))
+    sent=db.execute("SELECT updated_at FROM message_attempts WHERE candidate_hash=? AND message_index=1 AND status='sent' ORDER BY updated_at LIMIT 1",(row['candidate_hash'],)).fetchone()
+    if sent is None and history_exists:
+        sent=db.execute("SELECT updated_at FROM message_attempt_history WHERE candidate_hash=? AND message_index=1 AND status='sent' ORDER BY updated_at LIMIT 1",(row['candidate_hash'],)).fetchone()
+    if sent:
+        db.execute("UPDATE candidates SET status='sent',sent_at=COALESCE(sent_at,?),updated_at=? WHERE candidate_hash=?",(sent[0],stamp,row['candidate_hash']))
+    elif not historical:
+        db.execute('UPDATE candidates SET status=?,updated_at=? WHERE token=?',(args.result,stamp,args.token))
+    db.execute("DELETE FROM settings WHERE key='next_allowed_at'")
+    output(state=args.result,next_allowed_at=None,requires_manual_reconciliation=False)
 
 
-def note(db: sqlite3.Connection, args: argparse.Namespace) -> None:
-    at = now()
-    db.execute("BEGIN IMMEDIATE")
-    try:
-        run = run_row(db, args.run)
-        path = Path(run["profile_path"])
-        ok, reason, fields = profile_check(path)
-        if not ok or profile_hash(path) != run["profile_hash"]:
-            raise ValueError(reason if not ok else "profile_changed_since_start")
-        project = run_namespace(run, fields)
-        digest = candidate_hash(project, args.candidate_id)
-        active = active_progress(db, args.run)
-        if not active or active["candidate_hash"] != digest:
-            raise ValueError("candidate_not_active")
-        assessment = db.execute("SELECT decision,report_written FROM assessments WHERE run_id=? AND candidate_hash=?", (args.run, digest)).fetchone() if db.execute("SELECT 1 FROM sqlite_master WHERE name='assessments'").fetchone() else None
-        if not assessment or not assessment["report_written"] or assessment["decision"] != ("skip" if args.result == "skipped" else "review"):
-            raise ValueError("assessment_missing_or_not_synced")
-        cur = db.execute("INSERT OR IGNORE INTO candidates VALUES (?,?,?,?,?,?,?,?)", (digest, project, args.run, args.result, None, iso(at), None, iso(at)))
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    output(state="noted" if cur.rowcount else "candidate_seen", result=args.result)
+def note(db,args):
+    run=run_row(db,args.run)
+    digest=run_candidate_hash(db,args.run,args.candidate_id)
+    active=db.execute('SELECT * FROM candidate_progress WHERE run_id=? AND candidate_hash=?',(args.run,digest)).fetchone()
+    if active is None:active=ensure_candidate(db,args.run,args.candidate_id)
+    digest=active['candidate_hash']; stamp=iso(now())
+    previous=db.execute('SELECT 1 FROM candidates WHERE candidate_hash=?',(digest,)).fetchone()
+    if not previous:
+        db.execute('INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?)',(digest,run_namespace(run),args.run,args.result,None,stamp,None,stamp))
+    output(state='noted',result=args.result)
 
 
-def reconcile(db: sqlite3.Connection, args: argparse.Namespace) -> None:
-    if not args.manual_confirmed:
-        raise ValueError("manual platform verification is required")
-    at = now()
-    db.execute("BEGIN IMMEDIATE")
-    try:
-        row = db.execute("SELECT status, created_at FROM candidates WHERE token=?", (args.token,)).fetchone()
-        if row is None or row["status"] not in ("pending", "unknown"):
-            result = {"state": "blocked", "reason": "reservation_not_unresolved"}
-        else:
-            # The exact click time is unknown after recovery; use the later confirmation
-            # time so the rolling limit remains conservative.
-            sent_at = iso(at) if args.result == "sent" else None
-            db.execute("UPDATE candidates SET status=?, sent_at=?, updated_at=? WHERE token=?", (args.result, sent_at, iso(at), args.token))
-            if args.result == "sent":
-                next_allowed = iso(at + timedelta(seconds=80))
-                db.execute("INSERT INTO settings VALUES ('next_allowed_at', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (next_allowed,))
-            db.execute("UPDATE message_attempts SET status=?,updated_at=? WHERE token=?",(args.result,iso(at),args.token))
-            result = {"state": "reconciled", "result": args.result}
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    output(**result)
+def reconcile(db,args):
+    # Compatibility command: recorded outcomes can be corrected without manual-confirmed.
+    resolve(db,args)
 
 
 def unresolved_items(db: sqlite3.Connection, args: argparse.Namespace) -> None:
@@ -747,10 +573,12 @@ def main() -> None:
     check.add_argument("--profile", required=True)
     begin = commands.add_parser("start")
     begin.add_argument("--profile", required=True)
-    begin.add_argument("--stop-binding", type=Path, help="Validated chat-specific stop binding JSON; mandatory for new policies")
-    begin.add_argument("--target", type=int, default=150)
-    begin.add_argument("--duration-min", type=int, default=240)
+    begin.add_argument("--stop-binding", type=Path, help="Optional chat stop binding; never required to start")
+    begin.add_argument("--target", type=int, default=DEFAULT_TARGET)
+    begin.add_argument("--max-views", type=int, help="If omitted, max(300, greeting target)")
+    begin.add_argument("--duration-min", type=int, help="Deprecated compatibility argument; ignored")
     begin.add_argument("--min-score", type=int, default=70)
+    begin.add_argument("--greeting-mode", choices=("single", "triple"), help="Override this run's greeting mode; new projects default to single")
     view = commands.add_parser("status")
     view.add_argument("--run")
     commands.add_parser("runs")
@@ -766,6 +594,7 @@ def main() -> None:
         progress_command.add_argument("--run", required=True)
         progress_command.add_argument("--candidate-id", required=True)
     begin_candidate = commands.choices["candidate-begin"]
+    begin_candidate.add_argument("--new-visit",action="store_true",help="A genuine new opening; never use for retry/sync")
     begin_candidate.add_argument(
         "--started-at",
         help="ISO timestamp captured immediately before the switch/list click that opened this candidate",
@@ -785,8 +614,8 @@ def main() -> None:
     mark = commands.add_parser("resolve")
     mark.add_argument("--token", required=True)
     mark.add_argument("--result", required=True, choices=("sent", "not-sent", "unknown"))
-    mark.add_argument("--min-gap", type=int, default=64)
-    mark.add_argument("--max-gap", type=int, default=80)
+    mark.add_argument("--min-gap", type=int, default=0)
+    mark.add_argument("--max-gap", type=int, default=0)
     tag = commands.add_parser("note")
     tag.add_argument("--run", required=True)
     tag.add_argument("--candidate-id", required=True)
@@ -799,7 +628,7 @@ def main() -> None:
     try:
         if args.command == "profile-check":
             ok, reason, fields = profile_check(Path(args.profile))
-            output(state="ready" if ok else "blocked", reason=reason, company=fields.get("company"), position=fields.get("position"))
+            output(state="ready" if ok else "blocked", reason=reason, warnings=fields.get("_warnings"), company=fields.get("company"), position=fields.get("position"))
             return
         with connect(args.db) as db:
             {"start": start, "status": status, "runs": recent_runs, "control": control, "gate": gate, "candidate-begin": candidate_begin,

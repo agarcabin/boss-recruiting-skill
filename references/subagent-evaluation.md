@@ -1,3 +1,5 @@
+> 1.0.12：运行控制以[control-policy.md](control-policy.md)为准；下文历史时间/额度、审核阻塞、强制OCR、未决核销及逐动作门禁不再生效。
+
 # 子 agent 简历评估框架
 
 ## 目标与边界

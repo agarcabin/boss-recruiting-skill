@@ -6,8 +6,9 @@
   "profile_schema": "boss-greeting-profile/v1",
   "profile": "温州天超电器-装配工-标准化信息.md",
   "created_at": "2026-10-26T02:49:54+00:00",
-  "updated_at": "2026-10-27T00:00:00+08:00",
+  "updated_at": "2026-10-28T00:00:00+08:00",
   "candidate_namespace": "浙江天超电器有限公司-装配工",
   "evaluation_mode": "card",
-  "trigger_policy": "worker"
+  "trigger_policy": "worker",
+  "greeting_mode": "single"
 }

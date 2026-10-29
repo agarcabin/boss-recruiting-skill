@@ -80,7 +80,11 @@ def read_project(profile: Path) -> dict[str, object]:
     project_id = str(metadata.get("project_id") or make_project_id(company, position))
     if not PROJECT_ID.fullmatch(project_id):
         project_id = make_project_id(company, position)
+    greeting_mode = fields.get('greeting_mode', metadata.get('greeting_mode', 'single'))
+    if greeting_mode not in ('single', 'triple'):
+        raise ValueError('invalid_greeting_mode')
     return {"project_id": project_id, "company": company, "position": position,
+            "greeting_mode": greeting_mode,
             "approval": fields.get("approval", "pending"), "profile": str(profile),
             "metadata": str(metadata_path), "display_name": f"{company} - {position}"}
 
@@ -99,7 +103,7 @@ def register_project(profile: Path, project_id: str = "") -> dict[str, object]:
     digest = normalized_project_id(requested_id, str(project["company"]), str(project["position"]))
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     metadata = {**{key:existing[key] for key in ("candidate_namespace","evaluation_mode","trigger_policy","display_order") if key in existing}, "format": PACKAGE_FORMAT, "project_id": digest,
-                "company": project["company"], "position": project["position"],
+                "company": project["company"], "position": project["position"], "greeting_mode": project["greeting_mode"],
                 "profile_schema": "boss-greeting-profile/v1", "profile": profile.name,
                 "created_at": existing.get("created_at", stamp), "updated_at": stamp}
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

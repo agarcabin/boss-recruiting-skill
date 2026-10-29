@@ -20,6 +20,8 @@ from pathlib import Path
 from tkinter import messagebox
 
 import ledger
+import daily_metrics
+from keep_awake import KeepAwake
 from report_paths import report_path
 
 
@@ -38,9 +40,9 @@ SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
 SWP_FRAMECHANGED = 0x0020
 
-STATUS_WIDTH = 500
-BUTTON_WIDTH = 216
-PANEL_HEIGHT = 64
+STATUS_WIDTH = 650
+BUTTON_WIDTH = 300
+PANEL_HEIGHT = 80
 PANEL_TOP = 6
 PANEL_ALPHA = 0.78
 TRANSPARENT_KEY = "#010203"
@@ -200,32 +202,28 @@ def ensure_codex_maximized() -> tuple[bool, bool]:
     return True, bool(ctypes.windll.user32.IsZoomed(hwnd))
 
 
-def snapshot(db: sqlite3.Connection, run_id: str) -> dict:
+def snapshot(db: sqlite3.Connection, run_id: str, output_root=None) -> dict:
     run = ledger.run_row(db, run_id)
     progress = db.execute("""SELECT COUNT(*) AS started, COUNT(finished_at) AS completed,
         COUNT(electronic_opened_at) AS electronic FROM candidate_progress WHERE run_id=?""", (run_id,)).fetchone()
     active = ledger.active_progress(db, run_id)
     sent = db.execute("SELECT COUNT(*) FROM candidates WHERE run_id=? AND status='sent'", (run_id,)).fetchone()[0]
     state = ledger.control_state(db, run_id)
-    if state != "stopped" and ledger.now() >= ledger.parse_time(run["deadline_at"]):
-        state = "expired"
     drain_reason=run_safety.quantity_reason(db,run_id)
     if state=="running" and drain_reason: state="draining"
     elapsed = ledger.active_elapsed_seconds(db, run_id)
     average_row = db.execute("""SELECT AVG((julianday(finished_at)-julianday(started_at))*86400.0)
         FROM candidate_progress WHERE run_id=? AND finished_at IS NOT NULL""", (run_id,)).fetchone()
     average_seconds = round(average_row[0]) if average_row[0] is not None else None
-    remaining_minutes = None
-    if average_seconds is not None:
-        remaining_reviews = max(0, ESTIMATE_REVIEW_BASELINE - progress["completed"])
-        remaining_minutes = math.ceil(remaining_reviews * average_seconds / 60)
+    remaining_minutes,basis=daily_metrics.estimate(run,progress["started"],sent,average_seconds,elapsed)
+    daily=daily_metrics.daily_counts(db,run,output_root or Path.home()/"Desktop")
     return {"state": state, "elapsed": f"{elapsed // 3600:02d}:{elapsed % 3600 // 60:02d}:{elapsed % 60:02d}",
             "current_step": current_step(db, state, active), "drain_reason":drain_reason,
             "current": active["ordinal"] if active else None, "started": progress["started"],
             "completed": progress["completed"], "electronic": progress["electronic"],
             "sent": sent, "target": run["target"], "average_seconds": average_seconds,
-            "remaining_minutes": remaining_minutes,
-            "estimate_review_baseline": ESTIMATE_REVIEW_BASELINE,
+            "remaining_minutes": remaining_minutes,"estimate_basis":basis,**daily,
+            "estimate_review_baseline": run["max_views"],
             "started_at": run["started_at"], "profile_path": run["profile_path"]}
 
 
@@ -270,19 +268,23 @@ def current_step(db: sqlite3.Connection, state: str, active: sqlite3.Row | None)
     return "正在评估列表名片" if ledger.run_row(db,active["run_id"])["evaluation_mode"]=="card" else "正在查看电子简历"
 
 
-def metrics_text(data: dict) -> str:
-    average = "--" if data["average_seconds"] is None else str(data["average_seconds"])
-    remaining = "--" if data["remaining_minutes"] is None else str(data["remaining_minutes"])
-    return (
-        f"已查看 {data['completed']} 人 · 已招呼 {data['sent']} 人 · "
-        f"平均 {average} 秒/人 · 预计剩余 {remaining} 分钟"
-    )
+def metrics_text(data):
+    remaining="估算中" if data['remaining_minutes'] is None else str(data['remaining_minutes'])+" 分钟"
+    pending=" · 表格待同步" if data.get('report_pending') else ""
+    return f"今日已查看 {data.get('daily_viewed',0)} 人 · 已招呼 {data.get('daily_sent',0)} 人 · 预计剩余 {remaining}{pending}"
+
+
+def button_geometry(scale=1.0):
+    height=round(PANEL_HEIGHT/scale)
+    button_h=round(64/scale)
+    return dict(y=(height-button_h)//2,height=button_h,gap=round(8/scale),x=round(8/scale),widths=[round(v/scale) for v in (80,80,108)])
 
 
 class ProgressWindow:
     def __init__(self, root: tk.Tk, db_path: Path, run_id: str, output_root: Path, demo: bool = False):
         self.root, self.db_path, self.run_id, self.output_root = root, db_path, run_id, output_root
         self.demo = demo
+        self.wake = KeepAwake()
         self.timer: str | None = None
         self.last_codex_check = 0.0
         self.detail_metrics_key: tuple[int, int, int, int | None] | None = None
@@ -363,11 +365,9 @@ class ProgressWindow:
         self.button_canvas.create_rectangle(
             0, 0, rounded_radius, panel_height, fill=PANEL_BG, outline="",
         )
-        button_y = round(3 / self.ui_scale)
-        button_gap = round(3 / self.ui_scale)
-        button_x = round(3 / self.ui_scale)
-        button_h = round(58 / self.ui_scale)
-        button_widths = [round(56 / self.ui_scale), round(56 / self.ui_scale), round(88 / self.ui_scale)]
+        geometry=button_geometry(self.ui_scale)
+        button_y=geometry["y"];button_gap=geometry["gap"];button_x=geometry["x"]
+        button_h=geometry["height"];button_widths=geometry["widths"]
         self.button_rects = []
         self.button_texts = []
         self.button_enabled = [False, True, True]
@@ -410,7 +410,7 @@ class ProgressWindow:
     def _hover_button(self, index: int, hovering: bool) -> None:
         enabled = self.button_enabled[index]
         self.button_canvas.configure(cursor="hand2" if enabled else "")
-        fill = BUTTON_ACTIVE_BG if enabled and hovering else (BUTTON_BG if enabled else BUTTON_DISABLED_BG)
+        fill = ("#15803D" if hovering else "#166534") if enabled and index==0 else BUTTON_ACTIVE_BG if enabled and hovering else (BUTTON_BG if enabled else BUTTON_DISABLED_BG)
         self.button_canvas.itemconfigure(self.button_rects[index], fill=fill)
 
     def keep_codex_maximized(self) -> None:
@@ -424,7 +424,7 @@ class ProgressWindow:
     def read(self) -> dict:
         db = ledger.connect(self.db_path)
         try:
-            return snapshot(db, self.run_id)
+            return snapshot(db, self.run_id, self.output_root)
         finally:
             db.close()
 
@@ -447,6 +447,7 @@ class ProgressWindow:
             data = self.read()
             labels = {"running": "运行中", "paused": "已暂停", "login_required": "等待人工登录", "stopped": "已结束", "expired": "已到运行期限", "draining":"完成当前候选人"}
             state = data["state"]
+            if not self.demo: self.wake.set_running(state in ("running","draining"))
             if state in ("expired","stopped") or (state=="draining" and data["current"] is None):
                 self.begin_termination("run_expired" if state=="expired" else data.get("drain_reason") or "manual_stop")
                 return
@@ -462,7 +463,7 @@ class ProgressWindow:
             self.status_canvas.itemconfigure(
                 self.state_item, text=f"{labels[state]} · {data['elapsed']} · {data['current_step']}"
             )
-            metrics_key = (data["completed"], data["sent"], data["target"], data["average_seconds"])
+            metrics_key = (data.get("daily_viewed"),data.get("daily_sent"),data["remaining_minutes"],data.get("report_pending"))
             if metrics_key != self.detail_metrics_key:
                 self.status_canvas.itemconfigure(self.detail_item, text=metrics_text(data))
                 self.detail_metrics_key = metrics_key
@@ -474,13 +475,14 @@ class ProgressWindow:
             )
             self.button_canvas.itemconfigure(
                 self.button_rects[0],
-                fill=BUTTON_BG if self.pause_enabled else BUTTON_DISABLED_BG,
+                fill="#166534" if self.pause_enabled else BUTTON_DISABLED_BG,
             )
             self.button_canvas.itemconfigure(self.button_rects[1], fill=BUTTON_BG)
             self.button_canvas.itemconfigure(self.button_texts[1], fill="#F4F7FA")
             self.button_canvas.itemconfigure(self.button_rects[2], fill=BUTTON_BG)
             self.button_canvas.itemconfigure(self.button_texts[2], fill="#F4F7FA")
         except (OSError, ValueError, sqlite3.Error) as exc:
+            self.wake.close()
             self.status_canvas.itemconfigure(self.state_dot, fill="#EF6262")
             self.status_canvas.itemconfigure(self.state_item, text="读取状态失败")
             self.status_canvas.itemconfigure(self.detail_item, text=str(exc)[:100])
@@ -504,6 +506,7 @@ class ProgressWindow:
     def begin_termination(self, reason):
         if getattr(self, "terminating", False): return
         self.terminating = True
+        self.wake.close()
         if self.timer is not None:
             self.root.after_cancel(self.timer)
             self.timer = None
@@ -558,8 +561,9 @@ def main() -> None:
     with contextlib.closing(ledger.connect(args.db)) as db:
         ledger.run_row(db, args.run)
     root = tk.Tk()
-    ProgressWindow(root, args.db, args.run, args.output_root, demo=args.demo)
-    root.mainloop()
+    window=ProgressWindow(root,args.db,args.run,args.output_root,demo=args.demo)
+    try: root.mainloop()
+    finally: window.wake.close()
 
 
 if __name__ == "__main__":

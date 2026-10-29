@@ -57,7 +57,7 @@ def final_report(db,run_id,root):
         summary=wb.create_sheet('运行结果')
         summary.append(['运行编号',run_id]);summary.append(['停止原因',run['stop_reason']])
         summary.append(['Codex中断结果',run['interrupt_status'] or '未核验'])
-        summary.append(['截止时间',run['deadline_at']])
+        summary.append(['运行时间限制','无'])
         summary.append(['成功招呼人数',snapshot.execute("SELECT COUNT(*) FROM candidates WHERE run_id=? AND status='sent'",(run_id,)).fetchone()[0]])
         summary.append(['查看人数',snapshot.execute('SELECT COUNT(*) FROM candidate_progress WHERE run_id=?',(run_id,)).fetchone()[0]])
         summary.append(['未完成候选人（哈希）','状态'])
@@ -116,7 +116,6 @@ def finalize(db,run_id,root,interrupt=True,opener=None):
 def poll(db,run_id,root,interrupt=True,opener=None):
     run=ledger.run_row(db,run_id)
     reason=run['stop_reason']
-    if not reason and ledger.now()>=ledger.parse_time(run['deadline_at']): reason='run_expired'
     if not reason and run_safety.quantity_reason(db,run_id) and ledger.active_progress(db,run_id) is None:
         reason=run_safety.quantity_reason(db,run_id)
     if reason:

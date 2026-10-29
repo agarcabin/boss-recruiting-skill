@@ -1,75 +1,111 @@
-"""Only external-action entrypoint: binds an attempt, serializes with stop, never retries."""
-import contextlib
+"""UIA action entrypoint with optional accounting, without per-action identity fences."""
+from __future__ import annotations
 import argparse
+import contextlib
 import json
 import subprocess
-import sys
 from pathlib import Path
 import ledger
-import run_safety
 import powershell_host
+import recruiting_rules
 
-def dispatch(db,run_id,generation,command,token=None):
-    with run_safety.action_lock(db):
-        run=run_safety.ensure_writable(db,run_id,generation)
-        if ledger.now()>=ledger.parse_time(run['deadline_at']) or ledger.control_state(db,run_id)!='running': raise ValueError('run_not_running')
-        if token:
-            attempt=db.execute('SELECT * FROM message_attempts WHERE token=?',(token,)).fetchone()
-            if not attempt or attempt['run_id']!=run_id or attempt['status']!='pending' or attempt['generation']!=generation: raise ValueError('attempt_not_ready')
-            db.execute("UPDATE message_attempts SET status='dispatching' WHERE token=?",(token,))
-        process=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-        created=run_safety.process_birth(process.pid)
-        db.execute('INSERT OR REPLACE INTO run_helpers VALUES (?,?,?)',(run_id,process.pid,created))
-        try:
-            out,err=process.communicate(timeout=4)
-            if process.returncode: raise RuntimeError(err.decode('utf-8',errors='replace')[-1200:])
-            return {'state':'dispatched','verified_sent':False,'token':token,'output':out.decode('utf-8-sig',errors='replace')}
-        except Exception:
-            if process.poll() is None: process.kill();process.communicate()
-            if token:
-                db.execute("UPDATE message_attempts SET status='unknown',updated_at=? WHERE token=?",(ledger.iso(ledger.now()),token))
-                db.execute("UPDATE candidates SET status='unknown' WHERE token=? AND status='pending'",(token,))
-            raise
-        finally: db.execute('DELETE FROM run_helpers WHERE run_id=? AND pid=?',(run_id,process.pid))
+
+def validate_greeting_action(run, action, target):
+    if recruiting_rules.run_greeting_mode(run) == 'single':
+        if action == 'send-text' or target.get('name') in ('继续沟通', '继续打招呼'):
+            raise ValueError('single_greeting_disallows_followups')
+
+
+def validate_candidate_target(db, run, action, target, active, digest, token=None, key=None):
+    # Compatibility API. Candidate/active/generation checks were removed by the user.
+    return None
+
+
+def business_check(db, run_id, candidate_id):
+    """Retain selected job criteria, colleague check, target quantity and profile version."""
+    import coworker_progress
+    run = ledger.run_row(db, run_id)
+    path = Path(run['profile_path'])
+    if ledger.profile_hash(path) != run['profile_hash']:
+        raise ValueError('profile_changed_since_start')
+    digest = ledger.run_candidate_hash(db, run_id, candidate_id)
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE name='assessments'").fetchone():
+        raise ValueError('assessment_not_eligible')
+    assessment = db.execute('SELECT * FROM assessments WHERE run_id=? AND candidate_hash=?', (run_id, digest)).fetchone()
+    if not assessment or assessment['decision'] != 'greet' or not ledger.assessment_eligible(run, assessment):
+        raise ValueError('assessment_not_eligible')
+    if assessment['evaluation_mode'] != 'card':
+        result = coworker_progress.evaluate(json.loads(assessment['coworker_progress'] or '{}'), ledger.now())
+        if not result['may_continue']:
+            raise ValueError(result['reason'])
+    count = db.execute("SELECT COUNT(*) FROM candidates WHERE run_id=? AND status='sent'", (run_id,)).fetchone()[0]
+    if count >= run['target']:
+        raise ValueError('run_target_reached')
+
+
+def dispatch(db, run_id, generation, command, token=None):
+    # No action lock, run-state/generation, active-candidate or token validity gate.
+    process = subprocess.run(command, capture_output=True, timeout=8)
+    if process.returncode:
+        raise RuntimeError(process.stderr.decode('utf-8', errors='replace')[-1600:])
+    return {'state': 'dispatched', 'verified_sent': False, 'token': token,
+            'output': process.stdout.decode('utf-8-sig', errors='replace')}
+
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--db',type=Path,default=ledger.DEFAULT_DB)
-    p.add_argument('--run',required=True);p.add_argument('--generation',required=True,type=int)
-    p.add_argument('--target',required=True,type=Path);p.add_argument('--token');p.add_argument('--text-file',type=Path)
-    p.add_argument('--action',choices=('invoke','send-text','mouse','scroll-list','key'),default='invoke');p.add_argument('--mouse-args',type=Path);p.add_argument('--key',choices=('Right','Left','Escape'))
-    a=p.parse_args()
-    if a.action=='send-text' and (not a.token or not a.text_file): raise ValueError('send_text_requires_attempt_and_text')
-    if a.action=='key' and (not a.key or a.token or a.text_file): raise ValueError('key_action_requires_allowed_key_without_message_token')
-    with contextlib.closing(ledger.connect(a.db)) as db:
-        run=ledger.run_row(db,a.run)
-        target=json.loads(a.target.read_text(encoding="utf-8-sig"))
-        digest=ledger.run_candidate_hash(db,a.run,target["candidate_id"]) if a.action!="scroll-list" else None
-        active=ledger.active_progress(db,a.run)
-        if a.action=="scroll-list":
-            if active or run_safety.quantity_reason(db,a.run) or not target["document_url"].startswith("https://www.zhipin.com/web/chat/recommend"): raise ValueError("cannot_scroll_next_list")
-        elif not active or active["candidate_hash"]!=digest: raise ValueError("target_candidate_not_active")
-        if a.action=='key' and run['evaluation_mode']!='resume': raise ValueError('key_navigation_requires_resume_mode')
-        if a.action=='key' and not any(target.get('document_url','').startswith(prefix) for prefix in ('https://www.zhipin.com/web/frame/recommend/','https://www.zhipin.com/web/frame/c-resume/')): raise ValueError('key_navigation_document_not_allowed')
-        if run["evaluation_mode"]=="card" and a.action in ("invoke","mouse") and target["name"] not in ("打招呼","继续沟通","继续打招呼","关闭"):
-            raise ValueError("card_mode_cannot_open_resume")
-        if target.get("name") in ("打招呼","发送") and not a.token: raise ValueError("sending_requires_attempt")
-        if a.token:
-            attempt=db.execute("SELECT candidate_hash,message_index FROM message_attempts WHERE token=?",(a.token,)).fetchone()
-            if not attempt or attempt[0]!=digest: raise ValueError("attempt_target_mismatch")
-            if attempt[1]>1 and a.action!="send-text": raise ValueError("followup_requires_text_action")
-            if attempt[1]==1 and (a.action=="send-text" or target["name"]!="打招呼"): raise ValueError("first_message_requires_greeting_button")
-        command=[]
-        if a.action=='mouse':
-            args=json.loads(a.mouse_args.read_text(encoding='utf-8-sig'))
-            command += [str(Path(__file__).with_name('move-click.ps1')),'-GuardDeadline',run['deadline_at'],'-GuardTarget',str(a.target)]
-            allowed={'X','Y','StartX','StartY','WindowHandle','ContentBounds','SafeZonesPath'}
-            if set(args)-allowed: raise ValueError('unsupported_mouse_arguments')
-            for key,value in args.items(): command += ['-'+key,str(value)]
-        elif a.action=='key':
-            command += [str(Path(__file__).with_name('guarded-uia-action.ps1')),'-Target',str(a.target),'-Deadline',run['deadline_at'],'-Action','Key','-Key',a.key]
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--db', type=Path, default=ledger.DEFAULT_DB)
+    parser.add_argument('--run', required=True)
+    parser.add_argument('--generation', type=int, help='Compatibility argument, ignored')
+    parser.add_argument('--target', required=True, type=Path)
+    parser.add_argument('--token', help='Optional accounting reference, not an action credential')
+    parser.add_argument('--text-file', type=Path)
+    parser.add_argument('--action', choices=('invoke', 'send-text', 'mouse', 'scroll-list', 'key'), default='invoke')
+    parser.add_argument('--mouse-args', type=Path)
+    parser.add_argument('--key', choices=('Right', 'Left', 'Escape', 'Refresh'))
+    args = parser.parse_args()
+    target = json.loads(args.target.read_text(encoding='utf-8-sig'))
+    with contextlib.closing(ledger.connect(args.db)) as db:
+        run = ledger.run_row(db, args.run)
+        validate_greeting_action(run, args.action, target)
+        is_sending = args.action == 'send-text' or target.get('name') in ('打招呼', '发送')
+        token = args.token
+        if is_sending:
+            candidate_id = target.get('candidate_id')
+            if not candidate_id:
+                raise ValueError('candidate_id_needed_for_job_and_coworker_check')
+            business_check(db, args.run, candidate_id)
+            # Accounting is automatic; callers need not reserve or pass a token.
+            if token is None and args.action != 'send-text':
+                import io
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    ledger.reserve(db, argparse.Namespace(run=args.run, candidate_id=candidate_id))
+                recorded = json.loads(out.getvalue())
+                if recorded['state']=='already_sent':
+                    print(json.dumps(recorded,ensure_ascii=False));return
+                if recorded['state'] != 'ready':
+                    raise ValueError(recorded.get('reason', recorded['state']))
+                token = recorded['token']
+        if args.action == 'mouse':
+            values = json.loads(args.mouse_args.read_text(encoding='utf-8-sig'))
+            allowed = {'X', 'Y', 'StartX', 'StartY', 'WindowHandle', 'ContentBounds', 'SafeZonesPath'}
+            if set(values) - allowed:
+                raise ValueError('unsupported_mouse_arguments')
+            command = [str(Path(__file__).with_name('move-click.ps1'))]
+            for key, value in values.items():
+                command += ['-' + key, str(value)]
         else:
-            command += [str(Path(__file__).with_name('guarded-uia-action.ps1')),'-Target',str(a.target),'-Deadline',run['deadline_at'],'-Action','SendText' if a.action=='send-text' else 'Scroll' if a.action=='scroll-list' else 'Invoke']
-            if a.text_file: command += ['-TextFile',str(a.text_file)]
-        command=powershell_host.command(command[0], *command[1:])
-        print(json.dumps(dispatch(db,a.run,a.generation,command,a.token),ensure_ascii=False))
-if __name__=='__main__': main()
+            action = {'send-text': 'SendText', 'key': 'Key', 'scroll-list': 'Scroll'}.get(args.action, 'Invoke')
+            command = [str(Path(__file__).with_name('guarded-uia-action.ps1')), '-Target', str(args.target), '-Action', action]
+            if args.key:
+                command += ['-Key', args.key]
+            if args.text_file:
+                command += ['-TextFile', str(args.text_file)]
+        command = powershell_host.command(command[0], *command[1:])
+        result = dispatch(db, args.run, args.generation, command, token)
+        print(json.dumps(result, ensure_ascii=False))
+
+
+if __name__ == '__main__':
+    main()

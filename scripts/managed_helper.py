@@ -12,13 +12,12 @@ import run_safety
 def run(db,run_id,generation,command):
     with run_safety.action_lock(db):
         state=run_safety.ensure_writable(db,run_id,generation)
-        if ledger.now()>=ledger.parse_time(state['deadline_at']): raise ValueError('run_expired')
         process=subprocess.Popen(command)
         db.execute('INSERT INTO run_helpers VALUES (?,?,?)',(run_id,process.pid,run_safety.process_birth(process.pid)))
     try:
         while process.poll() is None:
             state=ledger.run_row(db,run_id)
-            if state['stop_reason'] or state['generation']!=generation or ledger.now()>=ledger.parse_time(state['deadline_at']):
+            if state['stop_reason'] or state['generation']!=generation:
                 process.kill();process.wait(timeout=2);raise ValueError('helper_cancelled')
             time.sleep(.2)
         return process.returncode

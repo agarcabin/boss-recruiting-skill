@@ -1,4 +1,4 @@
-﻿param(
+param(
     [Parameter(Mandatory = $true)][int]$X,
     [Parameter(Mandatory = $true)][int]$Y,
     [int]$StartX,
@@ -679,7 +679,6 @@ function Invoke-RealClick() {
         $guard = & (Join-Path $PSScriptRoot "guarded-uia-action.ps1") -Target $GuardTarget -Deadline $GuardDeadline -Action Probe | ConvertFrom-Json
         if ($X -lt $guard.bounds.x -or $X -ge ($guard.bounds.x+$guard.bounds.width) -or $Y -lt $guard.bounds.y -or $Y -ge ($guard.bounds.y+$guard.bounds.height)) { throw "mouse_target_bounds_mismatch" }
     }
-    if ($GuardDeadline -and [DateTimeOffset]::UtcNow -ge [DateTimeOffset]::Parse($GuardDeadline)) { throw "run_expired_before_click" }
     if ([NativeMouseTrajectory]::GetForegroundWindow() -ne $WindowHandle) {
         throw "点击前目标窗口已失去焦点，未点击。"
     }

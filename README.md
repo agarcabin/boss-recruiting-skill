@@ -1,6 +1,10 @@
+> 当前1.1.0汇总六项流程优化、现行控制口径及真实BOSS页面适配修复。正常运行见[连续运行](references/continuous-workflow.md)；旧单步接口保留调试及恢复。150项相关回归通过；完整旧测试集另有22失败、18错误尚待分类，未宣称全量通过。
+
 # BOSS Recruiting Skill
 
 在Codex中使用的BOSS招聘Skill，包含岗位资料管理、卡片或简历评估、受控招呼及归档流程。当前版本见SKILL.md，更新内容见CHANGELOG.md。
+
+招呼方式可选“单次打招呼 / 三连式打招呼”，所有岗位默认单次：点“打招呼”并核验成功后直接下一份简历/卡片，不点“继续沟通”。三连式保持原来的首句加第二、三句话术。运行可用--greeting-mode single/triple选择，详见references/greeting-modes.md。
 
 ## 安装与更新
 

@@ -8,18 +8,15 @@ import subprocess
 import sys
 from pathlib import Path
 import ledger
+import candidate_checks
 import powershell_host
 import run_safety
 
 
-def check_candidate(db, run_id, candidate_id, generation):
-    run = run_safety.ensure_writable(db, run_id, generation)
-    if ledger.control_state(db, run_id) != 'running' or ledger.now() >= ledger.parse_time(run['deadline_at']):
-        raise ValueError('capture_run_not_running')
-    active = ledger.active_progress(db, run_id)
-    digest = ledger.run_candidate_hash(db, run_id, candidate_id)
-    if not active or active['candidate_hash'] != digest or not active['electronic_opened_at']:
-        raise ValueError('registered_open_candidate_required')
+def check_candidate(db,run_id,candidate_id,generation):
+    # OCR remains optional; when used it follows the highest-priority colleague check.
+    candidate_checks.require_resume(db,run_id,candidate_id)
+    return ledger.run_row(db,run_id)
 
 
 def capture(db, run_id, candidate_id, hwnd, output_dir, execute=None):

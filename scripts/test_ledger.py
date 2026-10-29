@@ -125,6 +125,7 @@ class LedgerTests(unittest.TestCase):
         with patch.object(ledger, "now", return_value=future):
             self.assertEqual(self.reserve("https://example.test/candidate/002")["state"], "ready")
         self.db.execute("UPDATE candidates SET status='sent', sent_at=? WHERE status='pending'", (ledger.iso(ledger.now()),))
+        self.db.execute("UPDATE message_attempts SET status='sent' WHERE message_index=1 AND status='pending'")
         self.db.execute("UPDATE assessments SET send_status='sent',pdf_status='missing',resume_archive_status='missing' WHERE send_status='assessed'")
         self.finish("https://example.test/candidate/002")
         prior_run = call(ledger.start, self.db, profile=str(self.profile), target=50, duration_min=60, min_score=70)["run_id"]

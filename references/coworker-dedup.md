@@ -1,4 +1,6 @@
-> 2026-10-27现行口径：先按 [evaluation-modes.md](evaluation-modes.md) 分流。card不打开电子简历、不做OCR及详情同事检查；resume保留下文对应流程。所有外部动作经safe_action.py，不裸调用UIA Invoke/按键/鼠标；历史示例仅作底层技术参考。
+> 1.0.13新增功能及命令见[plan-features.md](plan-features.md)，包括同事前置、收藏、快速启动、今日表格统计和防息屏。
+
+> 2026-10-27现行口径：先按 [evaluation-modes.md](evaluation-modes.md) 分流。card不打开电子简历、不做OCR及详情同事检查；resume保留下文对应流程。操作入口见click-modes.md；不要求每次gate/reserve/token，运行控制以control-policy.md为准。
 
 # 同事沟通进度去重（2026-10-26用户指定）
 
@@ -16,7 +18,7 @@
 
 ## 定向读取与判定
 
-先以最新UIA定向核实并按需选择“同事沟通进度”页签；需要点击时，先检查gate，再按[点击方式开关](click-modes.md)执行：拟人轨迹开启用原鼠标流程，关闭用UIA InvokePattern，不移动鼠标。不得仅因截图上曾显示该页签就传已确认。随后运行只读提取器：
+先以最新UIA定向核实并按需选择“同事沟通进度”页签；需要点击时，按[点击方式开关](click-modes.md)执行：拟人轨迹开启用原鼠标流程，关闭用UIA InvokePattern，不移动鼠标。不得仅因截图上曾显示该页签就传已确认。随后运行只读提取器：
 
 ```powershell
 pwsh -NoProfile -File scripts/read-coworker-progress.ps1 -WindowHandle <当前HWND> -CoworkerTabConfirmed |
@@ -38,7 +40,7 @@ python scripts/coworker_progress.py --input <当前候选人-coworker.json>
 
 ## 逐人留痕
 
-电子简历打开并取得姓名后，先用稳定ID和进入点击时间运行`candidate-begin`并调用`electronic-opened`，使同事去重跳过者也计入查看人数。然后执行上述读取/判定。
+电子简历打开并取得姓名后，用原始候选标识登记本次访问（可由记录入口自动补齐），并按实际情况调用`electronic-opened`，使同事去重跳过者也计入查看人数。然后执行上述读取/判定。
 
 判定skip时不做OCR或岗位评分，使用：
 
@@ -60,4 +62,4 @@ Excel继续输出，本地assessments历史仍保存，但不读取Excel文件�
 python scripts/candidate_log.py lookup-name --name <姓名> --enable-local-excel-dedup
 ```
 
-平台稳定ID的发送账本、当前运行身份校验、发送结果unknown禁止重试等保护保持不变，不能借关闭姓名去重重复点击发送。
+稳定ID仅用于记账，不作历史去重；unknown不阻塞后续，允许重新读取页面后按当前状态有界重试，实际成功以页面证据为准。

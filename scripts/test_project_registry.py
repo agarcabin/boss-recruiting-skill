@@ -76,6 +76,21 @@ class ProjectRegistryTests(unittest.TestCase):
             project_registry.import_project(archive, self.root / "imported")
         self.assertEqual(project_registry.import_project(archive, self.root / "imported", overwrite=True)["state"], "imported")
 
+    def test_greeting_default_and_triple_survive_registration_export_import(self):
+        self.assertEqual(project_registry.read_project(self.profile)['greeting_mode'],'single')
+        project_registry.register_project(self.profile)
+        metadata=self.source/'project.json'
+        config=json.loads(metadata.read_text(encoding='utf-8'))
+        self.assertEqual(config['greeting_mode'],'single')
+        config['greeting_mode']='triple'
+        metadata.write_text(json.dumps(config),encoding='utf-8')
+        archive=self.root/'triple.boss-project.zip'
+        project_registry.export_project(self.profile,archive)
+        imported=project_registry.import_project(archive,self.root/'imported')
+        project=project_registry.list_projects(self.root/'imported')[0]
+        self.assertEqual(project['greeting_mode'],'triple')
+        self.assertEqual(json.loads(Path(project['metadata']).read_text(encoding='utf-8'))['greeting_mode'],'triple')
+
     def test_import_rejects_checksum_tampering(self):
         archive = self.root / "test.boss-project.zip"
         project_registry.export_project(self.profile, archive)
