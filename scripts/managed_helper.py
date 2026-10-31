@@ -8,11 +8,12 @@ import time
 from pathlib import Path
 import ledger
 import run_safety
+from windows_process import hidden_options
 
 def run(db,run_id,generation,command):
     with run_safety.action_lock(db):
         state=run_safety.ensure_writable(db,run_id,generation)
-        process=subprocess.Popen(command)
+        process=subprocess.Popen(command,**hidden_options())
         db.execute('INSERT INTO run_helpers VALUES (?,?,?)',(run_id,process.pid,run_safety.process_birth(process.pid)))
     try:
         while process.poll() is None:

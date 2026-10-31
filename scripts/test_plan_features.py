@@ -149,13 +149,13 @@ class FlowTests(controls.RelaxedControlsTests):
         self.assertTrue(current['report_pending'])
 
     def test_favorite_review_unsaved_is_clicked_once_and_verified(self):
-        self.record(decision='review')
+        self.record(decision='review',overall_score=95,electronic=dict(score=95,evidence='实际简历评分95'))
         reader=Mock(side_effect=[dict(state='unsaved',target=dict(name='收藏')),dict(state='saved')]);click=Mock()
         result=ui_features.favorite(self.db,self.run,'candidate-one',reader=reader,click=click)
         self.assertEqual(result['state'],'saved');click.assert_called_once()
 
     def test_favorite_sent_already_saved_does_not_toggle(self):
-        self.record();self.resolve(self.reserve()['token']);click=Mock()
+        self.record(overall_score=95,electronic=dict(score=95,evidence='实际简历评分95'));self.resolve(self.reserve()['token']);click=Mock()
         result=ui_features.favorite(self.db,self.run,'candidate-one',reader=Mock(return_value=dict(state='saved')),click=click)
         self.assertEqual(result['state'],'already_saved');click.assert_not_called()
 
@@ -165,7 +165,7 @@ class FlowTests(controls.RelaxedControlsTests):
         reader.assert_not_called()
 
     def test_favorite_unknown_after_click_does_not_retry(self):
-        self.record(decision='review');click=Mock();reader=Mock(side_effect=[dict(state='unsaved',target={}),dict(state='unavailable')])
+        self.record(decision='review',overall_score=95,electronic=dict(score=95,evidence='实际简历评分95'));click=Mock();reader=Mock(side_effect=[dict(state='unsaved',target={}),dict(state='unavailable')])
         self.assertEqual(ui_features.favorite(self.db,self.run,'candidate-one',reader=reader,click=click)['state'],'pending')
         click.assert_called_once()
 
@@ -193,7 +193,7 @@ class FlowTests(controls.RelaxedControlsTests):
         finally:wb.close()
 
     def test_favorite_result_is_exported_in_hidden_evidence_sheet(self):
-        self.record(decision='review')
+        self.record(decision='review',overall_score=95,electronic=dict(score=95,evidence='实际简历评分95'))
         ui_features.favorite(self.db,self.run,'candidate-one',reader=Mock(return_value=dict(state='saved')),click=Mock())
         path=candidate_log.workbook(self.db,self.root,ledger.iso(ledger.now()),profile_path=self.profile)
         from openpyxl import load_workbook
@@ -202,7 +202,7 @@ class FlowTests(controls.RelaxedControlsTests):
         finally:wb.close()
 
     def test_favorite_read_failure_is_recorded_without_blocking(self):
-        self.record(decision='review')
+        self.record(decision='review',overall_score=95,electronic=dict(score=95,evidence='实际简历评分95'))
         result=ui_features.favorite(self.db,self.run,'candidate-one',reader=Mock(side_effect=RuntimeError('UIA unavailable')))
         self.assertEqual(result['state'],'pending')
         self.assertEqual(self.db.execute('SELECT state FROM favorite_results').fetchone()[0],'pending')

@@ -8,6 +8,7 @@ from pathlib import Path
 import ledger
 import powershell_host
 import recruiting_rules
+from windows_process import hidden_options
 
 
 def validate_greeting_action(run, action, target):
@@ -45,7 +46,7 @@ def business_check(db, run_id, candidate_id):
 
 def dispatch(db, run_id, generation, command, token=None):
     # No action lock, run-state/generation, active-candidate or token validity gate.
-    process = subprocess.run(command, capture_output=True, timeout=8)
+    process = subprocess.run(command, capture_output=True, timeout=8, **hidden_options())
     if process.returncode:
         raise RuntimeError(process.stderr.decode('utf-8', errors='replace')[-1600:])
     return {'state': 'dispatched', 'verified_sent': False, 'token': token,

@@ -8,12 +8,13 @@ from pathlib import Path
 import ledger
 import powershell_host
 import safe_action
+from windows_process import hidden_options
 
 
 def observe(action,hwnd=None):
     command=powershell_host.command(Path(__file__).with_name('boss-ui-features.ps1'),'-Action',action)
     if hwnd: command+=['-WindowHandle',str(hwnd)]
-    done=subprocess.run(command,capture_output=True,text=True,encoding='utf-8-sig',timeout=12)
+    done=subprocess.run(command,capture_output=True,text=True,encoding='utf-8-sig',timeout=12,**hidden_options())
     if done.returncode: raise ValueError(done.stderr[-1500:])
     return json.loads(done.stdout)
 
@@ -25,15 +26,19 @@ def invoke(db,run_id,target):
         return safe_action.dispatch(db,run_id,None,command)
 
 
+def favorite_eligible(db,run_id,digest):
+    row=db.execute('SELECT overall_score,coworker_progress,eligibility_json FROM assessments WHERE run_id=? AND candidate_hash=?',(run_id,digest)).fetchone()
+    if not row or row['overall_score'] <= 90:
+        return False
+    colleague=json.loads(row['coworker_progress'] or '{}')
+    return colleague.get('action') not in ('skip','review') and json.loads(row['eligibility_json'] or '{}').get('trigger') not in ('coworker_skip','coworker_unknown')
+
+
 def favorite(db,run_id,candidate_id,hwnd=None,reader=observe,click=invoke):
     db.execute('''CREATE TABLE IF NOT EXISTS favorite_results(run_id TEXT NOT NULL,candidate_hash TEXT NOT NULL,
         state TEXT NOT NULL,evidence TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(run_id,candidate_hash))''')
     digest=ledger.run_candidate_hash(db,run_id,candidate_id)
-    row=db.execute('SELECT a.decision,a.coworker_progress,a.eligibility_json,c.status FROM assessments a LEFT JOIN candidates c ON c.candidate_hash=a.candidate_hash WHERE a.run_id=? AND a.candidate_hash=?',(run_id,digest)).fetchone()
-    if not row or not (row['decision']=='review' or row['status']=='sent'):
-        return dict(state='not_applicable')
-    colleague=json.loads(row['coworker_progress'] or '{}')
-    if colleague.get('action') in ('skip','review') or json.loads(row['eligibility_json'] or '{}').get('trigger') in ('coworker_skip','coworker_unknown'):
+    if not favorite_eligible(db,run_id,digest):
         return dict(state='not_applicable')
     try:
         state=reader('Favorite',hwnd)

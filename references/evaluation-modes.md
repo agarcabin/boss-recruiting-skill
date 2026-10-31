@@ -18,7 +18,7 @@
 1. 按本轮数量目标，定向UIA定位当前可见card-item；用capture-card.ps1保存card.png和card.uia.json（姓名、完整Name、优势、期望、列表沟通状态、URL、矩形、时间）。截图遮挡或身份不明不发送。同事图标有则先跳过；查明无图标再解析筛选字段。普通字段缺失记未知，不强制暂停；普通列表筛选不要求打开电子简历。
 2. candidate-begin在实际读取卡片时登记；未命中skip，无法读字段review；关键词命中greet。列表明确已沟通则按平台状态处理；不因账本历史命中跳过；不检查详情同事记录。
 3. 评估JSON包含card与card_evidence:{image,uia_json}、electronic_resume_enabled:false、实际started_at。record计算分数与触发原因、复制证据至当天名片图片目录并写Excel；原resume/PDF状态均not_applicable，而非missing。
-4. 按 [招呼方式开关](greeting-modes.md)执行：默认single只点列表“打招呼”，核验后直接下一卡片，不点继续沟通；只有triple才保留列表默认招呼、既有第二句介绍、第三句索简历并打开聊天小窗。称谓从卡片明确姓名/称谓读取，无证据用您好；普通筛选不打开电子简历；备选或成功招呼者可为收藏打开后返回列表。
+4. 按 [招呼方式开关](greeting-modes.md)执行：默认single只点列表“打招呼”，核验后直接下一卡片，不点继续沟通；只有triple才保留列表默认招呼、既有第二句介绍、第三句索简历并打开聊天小窗。称谓从卡片明确姓名/称谓读取，无证据用您好；普通筛选不打开电子简历；1.1.2起只有实际最终分>90者可为收藏打开后返回列表，备选或成功不再单独触发收藏。
 5. 本轮候选人处理完成后，用真实读取/完成时间finalize-timing并candidate-finish；timing_source=card_read，不编造详情切换点击。候选标识保留用于记录；各次访问使用独立键，不作历史去重。
 
 ## 简历模式

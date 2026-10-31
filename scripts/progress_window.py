@@ -41,7 +41,7 @@ SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
 SWP_FRAMECHANGED = 0x0020
 
-STATUS_WIDTH = 650
+STATUS_WIDTH = 710
 BUTTON_WIDTH = 300
 PANEL_HEIGHT = 80
 PANEL_TOP = 6
@@ -56,6 +56,52 @@ BUTTON_ACTIVE_BG = "#42576A"
 BUTTON_DISABLED_BG = "#26333E"
 BUTTON_BORDER = "#3C4D5D"
 ESTIMATE_REVIEW_BASELINE = 300
+INDICATOR_DIAMETER = 52
+TEXT_LEFT = 82
+
+
+def viewing_average(db,run_id,viewed,elapsed):
+    # Store the sampled value so refreshes/reopening the overlay do not change it.
+    db.execute('CREATE TABLE IF NOT EXISTS overlay_metrics(run_id TEXT PRIMARY KEY,viewed INTEGER,average_seconds REAL)')
+    row=db.execute('SELECT * FROM overlay_metrics WHERE run_id=?',(run_id,)).fetchone()
+    if row and row['viewed']==viewed:
+        return row['average_seconds']
+    average=round(elapsed/viewed,1) if viewed else None
+    db.execute('INSERT OR REPLACE INTO overlay_metrics VALUES (?,?,?)',(run_id,viewed,average))
+    return average
+
+
+def workflow_detail(db,run_id,state,active,elapsed):
+    if state not in ('running','draining'):
+        return current_step(db,state,active)
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name='workflow_state'").fetchone():
+        row=db.execute('SELECT * FROM workflow_state WHERE run_id=?',(run_id,)).fetchone()
+        if row:
+            payload=json.loads(row['payload'])
+            mode=ledger.run_row(db,run_id)['evaluation_mode']
+            labels=dict(select='正在选择候选人',open='正在打开电子简历' if mode!='card' else '正在查看列表名片',
+                coworker='正在检查同事沟通记录',read='正在读取电子简历' if mode!='card' else '正在读取列表名片',
+                assess='正在分析电子简历' if mode!='card' else '正在分析列表名片',send='正在打招呼',
+                verify='正在核验招呼结果',followups='正在发送后续话术',favorite='正在处理收藏',
+                finish='正在整理记录与报告',next='正在切换下一位候选人',complete='正在结束本轮')
+            label=labels.get(row['phase'],current_step(db,state,active))
+            name=payload.get('candidate',{}).get('candidate_name') or '姓名未知'
+            seconds=max(0,elapsed-int(payload.get('phase_started_elapsed',elapsed)))
+            return f'{label} - {name} - {seconds} 秒'
+    label=current_step(db,state,active)
+    if active:
+        db.execute('CREATE TABLE IF NOT EXISTS overlay_stage(run_id TEXT PRIMARY KEY,candidate_hash TEXT,step TEXT,started_elapsed INTEGER)')
+        clock=db.execute('SELECT * FROM overlay_stage WHERE run_id=?',(run_id,)).fetchone()
+        if not clock or clock['candidate_hash']!=active['candidate_hash'] or clock['step']!=label:
+            db.execute('INSERT OR REPLACE INTO overlay_stage VALUES (?,?,?,?)',(run_id,active['candidate_hash'],label,elapsed))
+            started_elapsed=elapsed
+        else:started_elapsed=clock['started_elapsed']
+        name='姓名未知'
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='assessments'").fetchone():
+            row=db.execute('SELECT candidate_name FROM assessments WHERE run_id=? AND candidate_hash=?',(run_id,active['candidate_hash'])).fetchone()
+            if row:name=row['candidate_name'] or name
+        return f'{label} - {name} - {max(0,elapsed-started_elapsed)} 秒'
+    return label
 
 
 def hide_console_window() -> None:
@@ -218,7 +264,8 @@ def snapshot(db: sqlite3.Connection, run_id: str, output_root=None) -> dict:
     average_seconds = round(average_row[0]) if average_row[0] is not None else None
     remaining_minutes,basis=daily_metrics.estimate(run,progress["started"],sent,average_seconds,elapsed)
     daily=daily_metrics.daily_counts(db,run,output_root or Path.home()/"Desktop")
-    step=current_step(db,state,active)
+    viewing_average_seconds=viewing_average(db,run_id,progress['started'],elapsed)
+    step=workflow_detail(db,run_id,state,active,elapsed)
     has_workflow=db.execute("SELECT 1 FROM sqlite_master WHERE name='workflow_state'").fetchone()
     if state=='running' and has_workflow:
         workflow=db.execute('SELECT phase,payload FROM workflow_state WHERE run_id=?',(run_id,)).fetchone()
@@ -231,6 +278,7 @@ def snapshot(db: sqlite3.Connection, run_id: str, output_root=None) -> dict:
             "current": active["ordinal"] if active else None, "started": progress["started"],
             "completed": progress["completed"], "electronic": progress["electronic"],
             "sent": sent, "target": run["target"], "average_seconds": average_seconds,
+            "viewing_average_seconds": viewing_average_seconds,"interrupt_status":run['interrupt_status'],
             "remaining_minutes": remaining_minutes,"estimate_basis":basis,**daily,
             "estimate_review_baseline": run["max_views"],
             "started_at": run["started_at"], "profile_path": run["profile_path"]}
@@ -280,7 +328,9 @@ def current_step(db: sqlite3.Connection, state: str, active: sqlite3.Row | None)
 def metrics_text(data):
     remaining="估算中" if data['remaining_minutes'] is None else str(data['remaining_minutes'])+" 分钟"
     pending=" · 表格待同步" if data.get('report_pending') else ""
-    return f"今日已查看 {data.get('daily_viewed',0)} 人 · 已招呼 {data.get('daily_sent',0)} 人 · 预计剩余 {remaining}{pending}"
+    average=data.get('viewing_average_seconds')
+    speed='--' if average is None else f'{average:g}'
+    return f"今日已查看 {data.get('daily_viewed',0)} 人 · 已招呼 {data.get('daily_sent',0)} 人 · 平均速度 {speed} 秒/人 · 预计剩余 {remaining}{pending}"
 
 
 def button_geometry(scale=1.0):
@@ -347,19 +397,19 @@ class ProgressWindow:
             fill=PANEL_BG, outline="",
         )
         self.state_dot = self.status_canvas.create_oval(
-            round(14 / self.ui_scale), round(14 / self.ui_scale),
-            round(22 / self.ui_scale), round(22 / self.ui_scale),
+            round(14 / self.ui_scale), round((PANEL_HEIGHT-INDICATOR_DIAMETER)/2 / self.ui_scale),
+            round((14+INDICATOR_DIAMETER) / self.ui_scale), round((PANEL_HEIGHT+INDICATOR_DIAMETER)/2 / self.ui_scale),
             fill="#4ADE80", outline="",
         )
         self.state_item = self.status_canvas.create_text(
-            round(30 / self.ui_scale), round(19 / self.ui_scale),
+            round(TEXT_LEFT / self.ui_scale), round(24 / self.ui_scale),
             text="正在读取账本…", anchor="w", fill=PANEL_FG,
-            font=("Microsoft YaHei UI", -13, "bold"),
+            font=("Microsoft YaHei UI", -max(8,round(13/self.ui_scale)), "bold"),
         )
         self.detail_item = self.status_canvas.create_text(
-            round(30 / self.ui_scale), round(44 / self.ui_scale),
+            round(TEXT_LEFT / self.ui_scale), round(51 / self.ui_scale),
             text="", anchor="w", fill=PANEL_MUTED,
-            font=("Microsoft YaHei UI", -11),
+            font=("Microsoft YaHei UI", -max(7,round(11/self.ui_scale))),
         )
 
         self.button_canvas = tk.Canvas(
@@ -391,7 +441,7 @@ class ProgressWindow:
             )
             text = self.button_canvas.create_text(
                 (x1 + x2) / 2, button_y + button_h / 2,
-                text=label, fill="#F4F7FA", font=("Microsoft YaHei UI", -11),
+                text=label, fill="#F4F7FA", font=("Microsoft YaHei UI", -max(7,round(11/self.ui_scale))),
                 tags=(f"button-{index}",),
             )
             self.button_rects.append(rect)
@@ -469,18 +519,23 @@ class ProgressWindow:
                 "expired": "#EF6262",
             }
             self.status_canvas.itemconfigure(self.state_dot, fill=dot_colors[state])
+            interrupt=data.get('interrupt_status') or ''
+            step=data['current_step']
+            if state=='paused' and getattr(self,'pausing',False):step='正在中断 Codex…'
+            elif state=='paused' and interrupt.startswith(('failed','not_bound')):
+                step='招聘已暂停，Codex中断失败，请手动停止'
             self.status_canvas.itemconfigure(
-                self.state_item, text=f"{labels[state]} · {data['elapsed']} · {data['current_step']}"
+                self.state_item, text=f"{labels[state]} · {data['elapsed']} · {step}"
             )
-            metrics_key = (data.get("daily_viewed"),data.get("daily_sent"),data["remaining_minutes"],data.get("report_pending"))
+            metrics_key = (data.get("daily_viewed"),data.get("daily_sent"),data["remaining_minutes"],data.get("report_pending"),data.get('viewing_average_seconds'))
             if metrics_key != self.detail_metrics_key:
                 self.status_canvas.itemconfigure(self.detail_item, text=metrics_text(data))
                 self.detail_metrics_key = metrics_key
-            self.pause_enabled = state in ("running", "paused")
+            self.pause_enabled = state == 'running' and not getattr(self,'pausing',False)
             self.button_enabled = [self.pause_enabled, True, True]
             self.button_canvas.itemconfigure(
-                self.button_texts[0], text="继续" if state == "paused" else "暂停",
-                fill="#F4F7FA" if self.pause_enabled else "#7C8A97",
+                self.button_texts[0], text="请在 Codex中\n回复“继续”" if state == "paused" else "暂停",
+                fill="#F4F7FA" if state == 'paused' or self.pause_enabled else "#7C8A97",
             )
             self.button_canvas.itemconfigure(
                 self.button_rects[0],
@@ -507,9 +562,18 @@ class ProgressWindow:
         self.timer = self.root.after(1000, self.refresh)
 
     def pause_or_resume(self) -> None:
+        if getattr(self,'pausing',False) or self.read()['state']!='running':return
         try:
-            self.change("resume" if self.read()["state"] == "paused" else "pause")
+            self.pausing=True
+            self.change('pause')
+            def worker():
+                try:
+                    with contextlib.closing(ledger.connect(self.db_path)) as db:
+                        if not self.demo:stop_controller.interrupt_run(db,self.run_id)
+                finally:self.pausing=False
+            threading.Thread(target=worker,daemon=False).start()
         except (OSError, ValueError, sqlite3.Error) as exc:
+            self.pausing=False
             messagebox.showerror("状态更新失败", str(exc))
 
     def begin_termination(self, reason):
@@ -540,6 +604,11 @@ class ProgressWindow:
             self.terminating=False
             messagebox.showerror("结束失败",error,parent=self.root)
             return
+        if not self.demo:
+            with contextlib.closing(ledger.connect(self.db_path)) as db:
+                status=ledger.run_row(db,self.run_id)['interrupt_status'] or ''
+            if status.startswith(('failed','not_bound')):
+                messagebox.showwarning('招聘已结束','招聘运行已结束，但未能中断 Codex，请手动点击 Codex 的停止按钮。\n'+status,parent=self.root)
         self.root.destroy()
         if report: os.startfile(report)
 

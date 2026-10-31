@@ -11,6 +11,7 @@ import ledger
 import candidate_checks
 import powershell_host
 import run_safety
+from windows_process import hidden_options
 
 
 def check_candidate(db,run_id,candidate_id,generation):
@@ -49,7 +50,7 @@ def _capture(db, run_id, candidate_id, hwnd, output_dir, execute=None):
     def stage(command):
         check_candidate(db, run_id, candidate_id, generation)
         result = execute(managed + command, check=True, capture_output=True, text=True, encoding='utf-8-sig',
-                         env={**os.environ, 'PYTHONUTF8': '1', 'PYTHONIOENCODING': 'utf-8'})
+                         env={**os.environ, 'PYTHONUTF8': '1', 'PYTHONIOENCODING': 'utf-8'}, **hidden_options())
         payload = json.loads(result.stdout.strip())
         check_candidate(db, run_id, candidate_id, generation)
         return payload

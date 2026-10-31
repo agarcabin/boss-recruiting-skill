@@ -1,10 +1,24 @@
-﻿param([Parameter(Mandatory=$true)][long]$WindowHandle,[Parameter(Mandatory=$true)][string]$ChatMarker,[Parameter(Mandatory=$true)][string]$Output)
+﻿param([long]$WindowHandle=0,[Parameter(Mandatory=$true)][string]$ChatMarker,[Parameter(Mandatory=$true)][string]$Output)
 $OutputEncoding = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = $OutputEncoding
 
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+if(!$WindowHandle){
+ $matching=@()
+ foreach($proc in @(Get-Process -Name ChatGPT,Codex -ErrorAction SilentlyContinue | Where-Object {$_.MainWindowHandle -ne 0})){
+  try{
+   $window=[System.Windows.Automation.AutomationElement]::FromHandle($proc.MainWindowHandle)
+   $document=$window.FindFirst([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.AndCondition]::new(
+    [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Document),
+    [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,$ChatMarker)))
+   if($document -and !$document.Current.IsOffscreen){$matching+=@($proc.MainWindowHandle)}
+  }catch{}
+ }
+ if($matching.Count -ne 1){throw 'unique_matching_codex_window_required'}
+ $WindowHandle=[long]$matching[0]
+}
 $root=[System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$WindowHandle)
 $condition=[System.Windows.Automation.AndCondition]::new(
  [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Group),
@@ -13,7 +27,7 @@ $docCondition=[System.Windows.Automation.AndCondition]::new(
  [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Document),
  [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,$ChatMarker))
 $documents=@($root.FindAll([System.Windows.Automation.TreeScope]::Descendants,$docCondition)|Where-Object {$value=$null;$_.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern,[ref]$value) -and $value.Current.Value -like 'app://*/index.html*'})
-if($documents.Count -ne 1){throw 'unique_matching_chat_document_required'}
+if($documents.Count -ne 1 -or $documents[0].Current.IsOffscreen){throw 'unique_matching_chat_document_required'}
 $document=$documents[0]
 $toolbar=$document.FindFirst([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.AndCondition]::new(
  [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::ToolBar),

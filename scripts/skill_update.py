@@ -20,6 +20,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 import uuid
+from windows_process import hidden_options
 from zipfile import ZipFile, ZIP_DEFLATED
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -125,14 +126,14 @@ def github_cli(args: list[str]) -> bytes:
         raise ValueError('github_cli_required_run_gh_auth_login')
     env = os.environ.copy()
     command = [executable, *args]
-    result = subprocess.run(command, capture_output=True, timeout=60, env=env)
+    result = subprocess.run(command, capture_output=True, timeout=60, env=env, **hidden_options())
     # An expired environment token can shadow a valid OS-keyring login.
     if result.returncode and any(env.get(k) for k in ('GH_TOKEN', 'GITHUB_TOKEN')):
         error = result.stderr.decode('utf-8', errors='replace').lower()
         if any(word in error for word in ('401', 'bad credentials', 'invalid', 'authentication')):
             for key in ('GH_TOKEN', 'GITHUB_TOKEN'):
                 env.pop(key, None)
-            result = subprocess.run(command, capture_output=True, timeout=60, env=env)
+            result = subprocess.run(command, capture_output=True, timeout=60, env=env, **hidden_options())
     if result.returncode:
         raise ValueError('github_cli_error: ' + result.stderr.decode('utf-8', errors='replace')[-1600:])
     return result.stdout

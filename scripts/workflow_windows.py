@@ -2,6 +2,7 @@
 from pathlib import Path
 import hashlib,json,subprocess,time,uuid
 import ledger,powershell_host,safe_action,ui_features,capture_resume,card_observation,fast_assessment,recruiting_rules
+from windows_process import hidden_options
 
 
 class WindowsAdapter:
@@ -12,10 +13,10 @@ class WindowsAdapter:
 
     def ps(self,name,*args):
         command=powershell_host.command(Path(__file__).with_name(name),*args)
-        done=subprocess.run(command,capture_output=True,text=True,encoding='utf-8-sig',timeout=15)
+        done=subprocess.run(command,capture_output=True,text=True,encoding='utf-8-sig',timeout=15,**hidden_options())
         if done.returncode and name=='workflow-uia.ps1' and 'boss_document_unavailable' in done.stderr:
             time.sleep(.2)
-            done=subprocess.run(command,capture_output=True,text=True,encoding='utf-8-sig',timeout=15)
+            done=subprocess.run(command,capture_output=True,text=True,encoding='utf-8-sig',timeout=15,**hidden_options())
         if done.returncode:raise RuntimeError(done.stderr[-1800:])
         return json.loads(done.stdout)
 
@@ -150,6 +151,8 @@ class WindowsAdapter:
         return dict(state='unknown')
 
     def favorite(self,candidate,mode):
+        if not ui_features.favorite_eligible(self.db,self.run,ledger.run_candidate_hash(self.db,self.run,candidate['candidate_id'])):
+            return dict(state='not_applicable')
         if mode=='card' and not self.detail_open:
             if not candidate.get('open_target'):return dict(state='pending',reason='resume_open_control_unavailable')
             self.invoke(candidate['open_target']);self.detail_open=True

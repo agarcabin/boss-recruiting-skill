@@ -15,6 +15,8 @@ import uuid
 from pathlib import Path
 import ledger
 import run_safety
+import powershell_host
+from windows_process import hidden_options
 
 def load_binding(path):
     binding=json.loads(path.read_text(encoding='utf-8-sig'))
@@ -25,18 +27,55 @@ def binding_action(binding,stop=False):
     if binding['kind']=='uia':
         with tempfile.TemporaryDirectory(prefix='codex-stop-') as directory:
             source=Path(directory)/'binding.json';source.write_text(json.dumps(binding,ensure_ascii=False),encoding='utf-8')
-            result=subprocess.run([shutil.which('pwsh') or 'powershell.exe','-NoProfile','-ExecutionPolicy','Bypass','-File',str(Path(__file__).with_name('codex-stop.ps1')),'-Binding',str(source),'-Action','Stop' if stop else 'Probe'],capture_output=True,timeout=5)
+            result=subprocess.run(powershell_host.command(Path(__file__).with_name('codex-stop.ps1'),'-Binding',source,'-Action','Stop' if stop else 'Probe'),capture_output=True,timeout=8,**hidden_options())
             if result.returncode: raise RuntimeError('codex_stop_failed: '+result.stderr.decode('utf-8',errors='replace')[-1600:])
             return json.loads(result.stdout.decode('utf-8-sig'))
     with tempfile.TemporaryDirectory(prefix='codex-stop-') as directory:
         source=Path(directory)/'binding.json'
         source.write_text(json.dumps(binding,ensure_ascii=False),encoding='utf-8')
-        result=subprocess.run(['powershell.exe','-NoProfile','-ExecutionPolicy','Bypass','-File',str(Path(__file__).with_name('app-server-stop.ps1')),'-Binding',str(source),'-Action','Stop' if stop else 'Probe'],capture_output=True,timeout=6)
+        result=subprocess.run(powershell_host.command(Path(__file__).with_name('app-server-stop.ps1'),'-Binding',source,'-Action','Stop' if stop else 'Probe'),capture_output=True,timeout=6,**hidden_options())
         if result.returncode: raise RuntimeError('app_server_stop_failed: '+result.stderr.decode('utf-8',errors='replace')[-1200:])
         return json.loads(result.stdout.decode('utf-8-sig'))
 
 
 def probe_binding(binding): return binding_action(binding)
+
+
+def bind_run(db,run_id,chat_title=None):
+    run=ledger.run_row(db,run_id)
+    db.execute('CREATE TABLE IF NOT EXISTS overlay_chat(run_id TEXT PRIMARY KEY,chat_title TEXT NOT NULL)')
+    saved=db.execute('SELECT chat_title FROM overlay_chat WHERE run_id=?',(run_id,)).fetchone()
+    if chat_title:
+        db.execute('INSERT OR REPLACE INTO overlay_chat VALUES (?,?)',(run_id,chat_title))
+    elif saved:chat_title=saved[0]
+    existing=json.loads(run['stop_binding']) if run['stop_binding'] else None
+    if existing and not chat_title:
+        if existing['kind']=='app_server' or not existing.get('chat_title'):return existing
+        chat_title=existing['chat_title']
+    if not chat_title:
+        _,_,fields=ledger.profile_check(Path(run['profile_path']))
+        date=ledger.parse_time(run['started_at']).astimezone(ledger.timezone(ledger.timedelta(hours=8))).date()
+        chat_title=f"{fields['company']} {fields['position']} - {date.isoformat()}"
+    db.execute('INSERT OR REPLACE INTO overlay_chat VALUES (?,?)',(run_id,chat_title))
+    with tempfile.TemporaryDirectory(prefix='codex-bind-') as directory:
+        path=Path(directory)/'binding.json'
+        command=powershell_host.command(Path(__file__).with_name('bind-codex-stop.ps1'),'-ChatMarker',chat_title,'-Output',path)
+        result=subprocess.run(command,capture_output=True,timeout=8,**hidden_options())
+        if result.returncode:raise RuntimeError('codex_binding_failed: '+result.stderr.decode('utf-8',errors='replace')[-1200:])
+        binding=load_binding(path)
+    db.execute('UPDATE runs SET stop_binding=? WHERE run_id=?',(json.dumps(binding,ensure_ascii=False),run_id))
+    return binding
+
+
+def interrupt_run(db,run_id):
+    try:
+        binding=bind_run(db,run_id)
+        status=binding_action(binding,True)['state']
+        if status not in ('interrupted','idle'):raise RuntimeError('unexpected_interrupt_state: '+status)
+    except Exception as exc:
+        status='failed: '+str(exc)
+    db.execute('UPDATE runs SET interrupt_status=? WHERE run_id=?',(status,run_id))
+    return status
 
 def final_report(db,run_id,root):
     import candidate_log
@@ -87,11 +126,7 @@ def finalize(db,run_id,root,interrupt=True,opener=None):
         owner=f'{os.getpid()}:{run_safety.process_birth(os.getpid()):.9f}:{uuid.uuid4().hex}'
         db.execute('UPDATE runs SET finalizer_owner=?,finalizer_claimed_at=? WHERE run_id=?',(owner,ledger.iso(ledger.now()),run_id))
     try:
-        status='not_bound'
-        if interrupt and run['stop_binding']:
-            try: status=binding_action(json.loads(run['stop_binding']),True)['state']
-            except Exception as exc: status='failed: '+str(exc)
-        db.execute('UPDATE runs SET interrupt_status=? WHERE run_id=?',(status,run_id))
+        if interrupt:interrupt_run(db,run_id)
         # Cancel only registered helper processes whose creation time still matches.
         until=time.monotonic()+5
         for row in db.execute('SELECT pid,created_at FROM run_helpers WHERE run_id=?',(run_id,)):

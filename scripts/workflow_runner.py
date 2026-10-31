@@ -5,6 +5,7 @@ from pathlib import Path
 from argparse import Namespace
 import ledger,candidate_log,candidate_checks,coworker_progress,recruiting_rules
 import fast_assessment,report_batch,run_safety
+import ui_features
 
 
 def call(fn,db,**values):
@@ -29,6 +30,9 @@ class Runner:
         self.save()
 
     def save(self):
+        previous_phase=self._saved[0] if self._saved else None
+        if previous_phase != self.phase or 'phase_started_elapsed' not in self.data:
+            self.data['phase_started_elapsed']=ledger.active_elapsed_seconds(self.db,self.run)
         payload=json.dumps(self.data,ensure_ascii=False)
         if self._saved==(self.phase,payload):return
         self.db.execute('INSERT INTO workflow_state VALUES (?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET phase=excluded.phase,payload=excluded.payload,updated_at=excluded.updated_at',
@@ -174,7 +178,7 @@ class Runner:
             if not answer:return self.handoff('followups',dict(first_sent=True,mode='triple'))
             self.data['followups']=answer;self.phase='favorite';return None
         if phase=='favorite':
-            if self.data.get('decision')=='review' or self.data.get('sent'):
+            if ui_features.favorite_eligible(self.db,self.run,self.data['visit_hash']):
                 try:self.data['favorite']=self.adapter.favorite(candidate,mode)
                 except (OSError,RuntimeError,ValueError) as exc:self.data.setdefault('warnings',[]).append('收藏待补：'+str(exc))
             self.phase='finish';return None

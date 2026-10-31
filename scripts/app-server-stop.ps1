@@ -11,7 +11,7 @@ $cancel=[Threading.CancellationTokenSource]::new(4000)
 $events=[Collections.Generic.Queue[object]]::new()
 function Send-Object($obj){
  $bytes=[Text.Encoding]::UTF8.GetBytes(($obj|ConvertTo-Json -Depth 20 -Compress))
- $ws.SendAsync([ArraySegment[byte]]::new($bytes),[Net.WebSockets.WebSocketMessageType]::Text,$true,$cancel.Token).GetAwaiter().GetResult()
+ $null=$ws.SendAsync([ArraySegment[byte]]::new($bytes),[Net.WebSockets.WebSocketMessageType]::Text,$true,$cancel.Token).GetAwaiter().GetResult()
 }
 function Receive-Object {
  $memory=[IO.MemoryStream]::new()
@@ -35,17 +35,22 @@ function Invoke-Rpc($id,$method,$params){
  }
 }
 try{
- $ws.ConnectAsync($uri,$cancel.Token).GetAwaiter().GetResult()
+ $null=$ws.ConnectAsync($uri,$cancel.Token).GetAwaiter().GetResult()
  $null=Invoke-Rpc 1 'initialize' @{clientInfo=@{name='recruiting-stop';version='2'}}
  Send-Object @{method='initialized';params=@{}}
  $result=Invoke-Rpc 2 'thread/read' @{threadId=$b.thread_id;includeTurns=$true}
  $turns=@($result.thread.turns)
- if(!$turns.Count -or $turns[-1].id -ne $b.turn_id -or $turns[-1].status -notin @('inProgress','in_progress')){throw 'bound_turn_not_active'}
+ if(!$turns.Count -or $turns[-1].status -notin @('inProgress','in_progress')){
+  @{state='idle';kind='app_server'}|ConvertTo-Json -Compress
+  exit 0
+ }
+ # Resume starts a new turn on the same bound thread; never reuse the old turn ID.
+ $activeTurnId=$turns[-1].id
  if($Action -eq 'Stop'){
-  $null=Invoke-Rpc 3 'turn/interrupt' @{threadId=$b.thread_id;turnId=$b.turn_id}
+  $null=Invoke-Rpc 3 'turn/interrupt' @{threadId=$b.thread_id;turnId=$activeTurnId}
   do{
    $message=if($events.Count){$events.Dequeue()}else{Receive-Object}
-  }while($message.method -ne 'turn/completed' -or $message.params.turn.id -ne $b.turn_id -or $message.params.turn.status -ne 'interrupted')
+  }while($message.method -ne 'turn/completed' -or $message.params.turn.id -ne $activeTurnId -or $message.params.turn.status -ne 'interrupted')
  }
  @{state=$(if($Action -eq 'Stop'){'interrupted'}else{'ready'});kind='app_server'}|ConvertTo-Json -Compress
 }finally{$ws.Dispose();$cancel.Dispose()}

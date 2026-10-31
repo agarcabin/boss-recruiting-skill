@@ -48,16 +48,16 @@ class ProgressWindowTests(unittest.TestCase):
     def test_current_step_and_metrics_refresh_from_completed_candidates(self):
         waiting = progress_window.snapshot(self.db, self.run_id)
         self.assertEqual(waiting["current_step"], "准备下一位候选人")
-        self.assertIn("平均 -- 秒/人", progress_window.metrics_text(waiting))
+        self.assertIn("平均速度 -- 秒/人", progress_window.metrics_text(waiting))
 
         candidate_id = "candidate-one"
         invoke(ledger.candidate_begin, self.db, run=self.run_id, candidate_id=candidate_id)
         opening = progress_window.snapshot(self.db, self.run_id)
-        self.assertEqual(opening["current_step"], "正在打开电子简历")
+        self.assertTrue(opening["current_step"].startswith("正在打开电子简历 - 姓名未知 - "))
 
         invoke(ledger.electronic_opened, self.db, run=self.run_id, candidate_id=candidate_id)
         viewing = progress_window.snapshot(self.db, self.run_id)
-        self.assertEqual(viewing["current_step"], "正在查看电子简历")
+        self.assertTrue(viewing["current_step"].startswith("正在查看电子简历 - 姓名未知 - "))
 
         digest = ledger.run_candidate_hash(self.db, self.run_id, candidate_id)
         ended = datetime.now(timezone.utc)
@@ -81,7 +81,7 @@ class ProgressWindowTests(unittest.TestCase):
         self.assertEqual(completed["estimate_review_baseline"], 300)
         self.assertEqual(
             progress_window.metrics_text(completed),
-            "已查看 1 人 · 已招呼 1 人 · 平均 100 秒/人 · 预计剩余 499 分钟",
+            f"今日已查看 0 人 · 已招呼 0 人 · 平均速度 {completed['viewing_average_seconds']:g} 秒/人 · 预计剩余 499 分钟",
         )
 
     def test_paused_time_freezes_display_elapsed(self):
