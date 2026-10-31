@@ -105,12 +105,13 @@ def build(root: Path, output: Path) -> dict:
 
 
 def fetch(url: str, limit: int = LIMIT) -> bytes:
+    import update_transport
+    if not update_transport.allowed_url(url):
+        raise ValueError('unexpected_download_host')
     req = Request(url, headers={'User-Agent': 'boss-recruiting-skill-updater',
                                'Accept': 'application/vnd.github+json'})
-    with urlopen(req, timeout=30) as response:
-        final = urlparse(response.geturl())
-        if final.scheme != 'https' or final.hostname not in (
-                'api.github.com', 'github.com', 'release-assets.githubusercontent.com', 'objects.githubusercontent.com'):
+    with urlopen(req, timeout=12) as response:
+        if not update_transport.allowed_url(response.geturl()):
             raise ValueError('unexpected_download_host')
         data = response.read(limit + 1)
     if len(data) > limit:
@@ -140,6 +141,9 @@ def github_cli(args: list[str]) -> bytes:
 def check(root: Path) -> dict:
     config = source(root)
     local = installed_version(root)
+    if not config.get('private'):
+        import update_transport
+        return update_transport.check(root,config,local)
     try:
         if config.get('private'):
             release = json.loads(github_cli(['api', f"repos/{config['repository']}/releases/latest"]))
@@ -153,6 +157,12 @@ def check(root: Path) -> dict:
         if str(exc).startswith('github_cli_error:') and 'HTTP 404' in str(exc):
             return dict(state='no_release', current_version=local, repository=config['repository'])
         raise
+    return release_result(config,local,release)
+
+
+def release_result(config, local, release):
+    if not isinstance(release,dict):
+        raise ValueError('invalid_release_response')
     if release.get('draft') or release.get('prerelease'):
         raise ValueError('stable_release_required')
     version = release['tag_name'].removeprefix('v')
@@ -187,7 +197,8 @@ def download(root: Path, release: dict) -> tuple[bytes, str]:
             if archive.stat().st_size > LIMIT or checksum.stat().st_size > 4096:
                 raise ValueError('release_download_too_large')
             return archive.read_bytes(), checksum.read_text(encoding='ascii')
-    return fetch(release['archive_url']), fetch(release['checksum_url'], 4096).decode('ascii')
+    import update_transport
+    return update_transport.download(root,release)
 
 
 def unpack(data: bytes, expected_version: str, repository: str) -> dict[str, bytes]:
@@ -321,7 +332,9 @@ def update(root: Path, backups: Path | None = None, database: Path | None = None
             raise ValueError('local_version_changed_during_update')
         backup = install(root, files, backups or state_dir() / 'updates' / 'backups')
     return dict(state='updated', previous_version=result['current_version'], version=installed_version(root),
-                backup=str(backup), release_url=result['release_url'], reload_skill=True)
+                backup=str(backup), release_url=result['release_url'], reload_skill=True,
+                update_route=result.get('update_route'),download_route=result.get('download_route'),
+                route_failures=result.get('route_failures',[]),download_route_failures=result.get('download_route_failures',[]))
 
 
 def main() -> None:

@@ -304,6 +304,8 @@ def workbook(db, root: Path, started_at: str, filename: str | None = None,
         details.column_dimensions[letter].width = min(
             52, max(13, max(len(str(c.value or "")) for c in col[:100]) + 2)
         )
+    import resume_diagnostics
+    resume_diagnostics.append_sheet(wb,db,profile_path,started_at)
     handle, tmp = tempfile.mkstemp(prefix=".简报-", suffix=".xlsx", dir=folder)
     os.close(handle)
     try:
@@ -364,12 +366,18 @@ def record(db, args, payload=None):
     digest=active['candidate_hash']
     resume_paths = [None, None, None]
     warnings=[]
+    import resume_diagnostics
+    save_failure_note=payload.get('resume_save_error') or payload.get('read_warning','')
+    if save_failure_note:
+        resume_diagnostics.record(db,args.run,payload['candidate_id'],'电子简历读取/保存',save_failure_note)
     if scores["resume_evidence"]:
         try:
             resume_paths = archive_resume_files(args.output_root,payload["started_at"],str(payload["candidate_name"]).strip(),digest,scores["resume_evidence"])
             payload["resume_evidence"] = dict(image=resume_paths[0],ocr_text=resume_paths[1],ocr_json=resume_paths[2])
         except (ValueError,OSError) as exc:
             warnings.append('简历归档待补：'+str(exc))
+            save_failure_note=resume_diagnostics.reason(exc)
+            resume_diagnostics.record(db,args.run,payload['candidate_id'],'电子简历归档',exc)
     card_paths=(None,None)
     if rules.get("mode")=="card":
         try: card_paths=archive_card_files(args.output_root,payload["started_at"],payload["candidate_name"],digest,payload)
@@ -404,6 +412,12 @@ def record(db, args, payload=None):
     db.execute("UPDATE assessments SET evaluation_mode=?,eligibility_json=?,evaluation_input=?,card_image_path=?,card_uia_path=?,timing_source=? WHERE run_id=? AND candidate_hash=?",
                (rules.get("mode","resume"),json.dumps(result,ensure_ascii=False),json.dumps(payload,ensure_ascii=False),*card_paths,
                 "card_read" if rules.get("mode")=="card" else "detail_click",args.run,digest))
+    if save_failure_note and rules.get('mode')!='card' and not resume_paths[0]:
+        db.execute("UPDATE assessments SET resume_archive_status='missing',resume_archive_note=? WHERE run_id=? AND candidate_hash=? AND resume_archive_status<>'saved'",
+                   (save_failure_note,args.run,digest))
+    if resume_paths[0]:
+        db.execute("UPDATE assessments SET resume_image_path=?,resume_ocr_text_path=?,resume_ocr_json_path=?,resume_archive_status='saved',resume_archive_note='' WHERE run_id=? AND candidate_hash=?",
+                   (*resume_paths,args.run,digest))
     if rules.get("mode")=="card" or not rules.get("pdf_required",True):
         db.execute("UPDATE assessments SET pdf_status='not_applicable' WHERE run_id=? AND candidate_hash=?",(args.run,digest))
     db.execute("UPDATE assessments SET coworker_progress=? WHERE run_id=? AND candidate_hash=?",
@@ -749,6 +763,10 @@ def archive_card_files(root,started_at,name,digest,payload):
         if source.resolve()!=target.resolve(): shutil.copyfile(source,target)
         paths.append(str(target))
     return paths
+
+import resume_diagnostics
+archive=resume_diagnostics.archive_failure('PDF归档','pdf_status')(archive)
+archive_resume=resume_diagnostics.archive_failure('电子简历归档','resume_archive_status')(archive_resume)
 
 for _mutation_name in ("record","sync","archive","archive_resume","missing_resume","missing","finalize_timing","coworker_skip"):
     if _mutation_name in globals(): globals()[_mutation_name]=run_safety.fenced(globals()[_mutation_name])

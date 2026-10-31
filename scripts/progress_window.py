@@ -10,6 +10,7 @@ import run_safety
 import ctypes
 import ctypes.wintypes as wintypes
 import io
+import json
 import math
 import os
 import sqlite3
@@ -217,8 +218,16 @@ def snapshot(db: sqlite3.Connection, run_id: str, output_root=None) -> dict:
     average_seconds = round(average_row[0]) if average_row[0] is not None else None
     remaining_minutes,basis=daily_metrics.estimate(run,progress["started"],sent,average_seconds,elapsed)
     daily=daily_metrics.daily_counts(db,run,output_root or Path.home()/"Desktop")
+    step=current_step(db,state,active)
+    has_workflow=db.execute("SELECT 1 FROM sqlite_master WHERE name='workflow_state'").fetchone()
+    if state=='running' and has_workflow:
+        workflow=db.execute('SELECT phase,payload FROM workflow_state WHERE run_id=?',(run_id,)).fetchone()
+        if workflow and workflow['phase']=='send' and json.loads(workflow['payload']).get('rate_limit'):
+            import greeting_rate
+            rate=greeting_rate.status(db)
+            if rate['state']=='rate_limited':step=f"速度控制：等待{rate['retry_after_seconds']}秒后继续（10人/5分钟）"
     return {"state": state, "elapsed": f"{elapsed // 3600:02d}:{elapsed % 3600 // 60:02d}:{elapsed % 60:02d}",
-            "current_step": current_step(db, state, active), "drain_reason":drain_reason,
+            "current_step": step, "drain_reason":drain_reason,
             "current": active["ordinal"] if active else None, "started": progress["started"],
             "completed": progress["completed"], "electronic": progress["electronic"],
             "sent": sent, "target": run["target"], "average_seconds": average_seconds,

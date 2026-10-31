@@ -76,13 +76,15 @@ def main():
                 raise ValueError('candidate_id_needed_for_job_and_coworker_check')
             business_check(db, args.run, candidate_id)
             # Accounting is automatic; callers need not reserve or pass a token.
-            if token is None and args.action != 'send-text':
+            if args.action != 'send-text' and (target.get('name')=='打招呼' or token is None):
                 import io
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out):
                     ledger.reserve(db, argparse.Namespace(run=args.run, candidate_id=candidate_id))
                 recorded = json.loads(out.getvalue())
                 if recorded['state']=='already_sent':
+                    print(json.dumps(recorded,ensure_ascii=False));return
+                if recorded['state']=='rate_limited':
                     print(json.dumps(recorded,ensure_ascii=False));return
                 if recorded['state'] != 'ready':
                     raise ValueError(recorded.get('reason', recorded['state']))

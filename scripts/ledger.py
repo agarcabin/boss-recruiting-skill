@@ -394,7 +394,8 @@ def status(db: sqlite3.Connection, args: argparse.Namespace) -> None:
                    "current_candidate_number": active["ordinal"] if active else None, "current_stage": current_stage,
                    "candidates_started": progress["started"], "candidates_completed": progress["finished"], "view_remaining": max(0, row["max_views"]-progress["started"]),
                    "electronic_resume_opened_candidates": progress["electronic_opened"], "greetings_sent": counts.get("sent", 0)}
-    output(state="status", rolling_sent=rolling_count(db, at), rolling_remaining=None, unresolved=unresolved(db), next_allowed_at=None, counts=counts, **details)
+    import greeting_rate
+    output(state="status", rolling_sent=rolling_count(db, at), rolling_remaining=None, unresolved=unresolved(db), next_allowed_at=None, counts=counts, rate_limit=greeting_rate.status(db,at), **details)
 
 
 def recent_runs(db: sqlite3.Connection, args: argparse.Namespace) -> None:
@@ -471,6 +472,12 @@ def watch(db: sqlite3.Connection, args: argparse.Namespace) -> None:
 
 
 def reserve(db,args):
+    import greeting_rate
+    with greeting_rate.transaction(db):
+        return _reserve(db,args)
+
+
+def _reserve(db,args):
     run = run_row(db,args.run)
     ok,reason,fields = profile_check(Path(run['profile_path']))
     if not ok:
@@ -492,7 +499,13 @@ def reserve(db,args):
     if previous and previous['status']=='sent':
         output(state='already_sent',token=previous['token']);return
     if previous and previous['status']=='pending':
+        import greeting_rate
+        rate=greeting_rate.claim(db,digest)
+        if rate['state']=='rate_limited':output(**rate);return
         output(state='ready',token=previous['token'],reused=True);return
+    import greeting_rate
+    rate=greeting_rate.claim(db,digest)
+    if rate['state']=='rate_limited':output(**rate);return
     token=uuid.uuid4().hex;stamp=iso(now())
     if previous:
         db.execute("""CREATE TABLE IF NOT EXISTS message_attempt_history (

@@ -103,19 +103,28 @@ class WindowsAdapter:
         data=self.query('Resume');text=data.get('keyword_text','')
         result=dict(keyword_text=text,read_source=data.get('source','directed_resume_uia'))
         rules=recruiting_rules.run_rules(ledger.run_row(self.db,self.run))
-        if fast_assessment.evaluate(rules,result,recruiting_rules.positive_hits):return result
+        if fast_assessment.evaluate(rules,result,recruiting_rules.positive_hits):
+            result['resume_save_note']='关键词直接通道使用UIA正文，未执行可选长图/OCR采集，因此没有简历图片文件。'
+            return result
         # Overview text is useful for a direct rule, but does not prove that a
         # canvas-rendered resume body was read. Test body length independently.
         body=data.get('resume_text',text)
+        result['resume_save_note']=('本轮关闭了可选OCR（--no-ocr），未采集简历长图。' if not self.allow_ocr else
+                                    '已通过UIA读取正文，本次未执行可选长图/OCR采集。')
         if len(body.strip())<80 and self.allow_ocr:
             folder=self.folder/('resume-'+uuid.uuid4().hex)
             try:
                 captured=capture_resume.capture(self.db,self.run,candidate['candidate_id'],self.hwnd,folder)
                 result['resume_evidence']=captured['resume_evidence']
+                result.pop('resume_save_note',None)
                 ocr_text=Path(captured['resume_evidence']['ocr_text']).read_text(encoding='utf-8-sig')
                 result['keyword_text']='\n'.join(part for part in (ocr_text,data.get('overview_text','')) if part)
                 result['read_source']='local_ocr_and_overview_uia'
-            except (OSError,ValueError,subprocess.SubprocessError) as exc:result['read_warning']=str(exc)
+            except (OSError,ValueError,subprocess.SubprocessError) as exc:
+                import resume_diagnostics
+                result['read_warning']=str(exc)
+                result['resume_save_error']=resume_diagnostics.reason(exc)
+                result.pop('resume_save_note',None)
         # Full raw evidence remains local; requests contain facts once per visit.
         return result
 
@@ -123,6 +132,9 @@ class WindowsAdapter:
         found=self.query('Greeting',candidate if mode=='card' else None)
         if found['state']!='found':return dict(state='not-sent',reason='greeting_control_unavailable')
         if found['match']['label']!='打招呼':return dict(state='not-sent',reason='platform_already_contacted')
+        import greeting_rate
+        rate=greeting_rate.claim(self.db,ledger.run_candidate_hash(self.db,self.run,candidate['candidate_id']))
+        if rate['state']=='rate_limited':return rate
         self.invoke(found['match']['target'])
         for attempt in range(3):
             result=self.verify(candidate,mode)

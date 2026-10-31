@@ -20,6 +20,17 @@ def check_candidate(db,run_id,candidate_id,generation):
 
 
 def capture(db, run_id, candidate_id, hwnd, output_dir, execute=None):
+    try:
+        return _capture(db,run_id,candidate_id,hwnd,output_dir,execute)
+    except (OSError,ValueError,subprocess.SubprocessError) as exc:
+        import resume_diagnostics
+        detail=resume_diagnostics.reason(exc)
+        stage='电子简历OCR/文件校验' if 'ocr' in detail.lower() else '电子简历采集/保存'
+        resume_diagnostics.record(db,run_id,candidate_id,stage,exc)
+        raise
+
+
+def _capture(db, run_id, candidate_id, hwnd, output_dir, execute=None):
     execute = execute or subprocess.run
     generation = ledger.run_row(db, run_id)['generation']
     check_candidate(db, run_id, candidate_id, generation)

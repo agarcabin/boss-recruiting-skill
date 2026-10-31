@@ -1,5 +1,11 @@
 {
   "schema": "boss-skill-update/v1",
   "repository": "agarcabin/boss-recruiting-skill",
-  "private": false
+  "private": false,
+  "mirrors": [
+    "https://gh-proxy.org/",
+    "https://gh-proxy.com/",
+    "https://ghfast.top/",
+    "https://ghproxy.net/"
+  ]
 }

@@ -20,6 +20,8 @@ class SkillUpdateTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)
+        storage = patch.object(updater,'state_dir',return_value=self.base/'updater-state')
+        storage.start();self.addCleanup(storage.stop)
         self.local = self.base / 'local'
         self.remote = self.base / 'remote'
         self.repository = 'owner/recruiting'
@@ -43,7 +45,10 @@ class SkillUpdateTests(unittest.TestCase):
     def fetch(self, url, limit=updater.LIMIT):
         if url.endswith('/releases/latest'):
             return json.dumps(self.release).encode()
-        return {self.archive_url: self.archive, self.checksum_url: self.checksum}[url]
+        for canonical in (self.archive_url,self.checksum_url):
+            if url.endswith(canonical):
+                return {self.archive_url:self.archive,self.checksum_url:self.checksum}[canonical]
+        raise ValueError('unexpected test URL: '+url)
 
     def test_version_comparison_supports_reset_and_decimal_increments(self):
         self.assertLess(updater.version_key('1.0.0'), updater.version_key('1.01'))

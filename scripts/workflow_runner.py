@@ -44,6 +44,7 @@ class Runner:
                     candidate=self.data.get('candidate'),request_file=self.data.get('request_file'),
                     response_file=self.data.get('response_file'),visits=self.data.get('visits',0),
                     warnings=self.data.get('warnings',[]),error=self.data.get('error'),
+                    rate_limit=self.data.get('rate_limit'),
                     last_result=self.data.get('last_result'),exports=self.data.get('exports',[]))
 
     def handoff(self,kind,payload):
@@ -138,12 +139,19 @@ class Runner:
             self.phase='send' if self.data['decision']=='greet' else 'favorite';return None
         if phase=='send':
             reservation=call(ledger.reserve,self.db,run=self.run,candidate_id=cid)
+            if reservation['state']=='rate_limited':
+                self.data['rate_limit']=reservation
+                return self.status('rate_limited')
+            self.data.pop('rate_limit',None)
             if reservation['state']=='already_sent':self.phase='favorite';return None
             self.data['token']=reservation['token'];self.data['attempts']+=1
             # Persist before dispatch: a restarted worker verifies, it does not blindly resend.
             self.phase='verify';self.save()
             try:result=self.adapter.send(candidate,mode)
             except (OSError,RuntimeError,ValueError) as exc:result=dict(state='unknown',error=str(exc))
+            if result.get('state')=='rate_limited':
+                self.phase='send';self.data['rate_limit']=result;self.data['attempts']-=1
+                return self.status('rate_limited')
             call(ledger.resolve,self.db,token=self.data['token'],result=result.get('state','unknown'))
             self.data['send_result']=result
             return None
@@ -258,7 +266,7 @@ def main():
                     stop_controller.finalize(db,args.run,args.output_root,interrupt=False)
                 if not args.worker:print(json.dumps(result,ensure_ascii=False));break
                 if result['state'] in ('complete','stopped','needs_attention','needs_page'):break
-                time.sleep(.5 if result['state']!='candidate_complete' else 0)
+                time.sleep(1 if result['state']=='rate_limited' else .5 if result['state']!='candidate_complete' else 0)
         finally:db.execute('DELETE FROM workflow_owner WHERE run_id=? AND pid=?',(args.run,os.getpid()))
 
 
