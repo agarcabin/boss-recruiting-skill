@@ -1,0 +1,8 @@
+profiles/
+runtime/
+__pycache__/
+*.pyc
+*.dpapi
+*.sqlite3*
+*.xlsx
+dist/

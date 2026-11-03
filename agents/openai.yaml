@@ -1,0 +1,4 @@
+interface:
+  display_name: "BOSS 招聘自动化"
+  short_description: "管理岗位资料、长截图 OCR 筛选候选人、受控发送招呼并归档简历与 PDF"
+  default_prompt: "使用 $boss-recruiting，显示六项首页菜单：1. 继续上次项目（显示企业、岗位及运行状态）；2. 查看已有项目；3. 创建新的项目；4. 更新项目；5. 测试；6. 退出。"
