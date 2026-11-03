@@ -8,7 +8,7 @@ DOCS={
 
 python scripts/quick_start.py --prompt "给已选择的企业岗位打招呼50人"
 
-返回 plan_file、冻结的岗位/数量/最低分和 pending_startup_actions。仅执行尚未完成的启动步骤，使用 --plan <plan_file> --complete-action <action> 记录实际结果。先打开推荐页，让用户手动筛选并回复1，再执行 --plan <plan_file> --confirm-filters。重复确认复用同一 run_id。不能把未完成动作记为成功。
+通用“开始打招呼”“帮我打招呼”或“菜单1”展示实时六项主菜单；“菜单2”展示企业选择。主菜单第1项继续上次项目、第2项查看已有项目。仅给人数时保留数量等待选岗，不猜测岗位。明确企业或岗位且唯一匹配时返回ready_to_start与plan_file；打开并核对BOSS岗位、完成pending_startup_actions后，执行--plan <plan_file> --start-direct创建运行，不再等待人工筛选或回复1。重复启动复用同一run_id。--complete-action仅登记实际完成的步骤。旧await_filters计划仍兼容--confirm-filters。
 
 默认150招呼、300查看；只指定招呼数时查看默认max(300,招呼目标)，显式查看目标优先。当前任一数量目标达到即在当前候选收尾后结束，不打开下一位。无时长和滚动24小时上限。
 
@@ -74,7 +74,7 @@ record共用字段：candidate_id、candidate_name、started_at（含时区）�
 ''',
 'run-commands.md':'''# 命令入口
 
-正常运行：project_registry.py menu/list → quick_start.py --prompt →完成启动步骤→用户筛选并回复1→quick_start.py --plan <plan> --confirm-filters → launch_progress.py --run <run> → workflow_runner.py --run <run> --launch。
+正常运行：通用启动或菜单1→project_registry.py menu（六项主菜单）；菜单2或主菜单第2项→project_registry.py list（企业→岗位）。明确岗位的招呼指令→quick_start.py --prompt→完成启动步骤并核对BOSS岗位→quick_start.py --plan <plan> --start-direct→launch_progress.py --run <run>→workflow_runner.py --run <run> --launch。仅给人数先选岗位；旧await_filters计划兼容--confirm-filters。
 
 workflow_runner.py --status读取检查点；运行内暂停/继续/结束由统一控制器处理。调试单步命令及参数使用ledger.py、candidate_log.py、boss_safe_actions.py、stop_controller.py的--help，不能把调试入口作为绕过同事/规则/限速的途径。
 

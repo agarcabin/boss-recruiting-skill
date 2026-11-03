@@ -4,6 +4,26 @@ from pathlib import Path
 from unittest.mock import patch
 import group_policy,hit_summary,report_store,run_admission,vault_crypto
 
+class StartupMenuTests(unittest.TestCase):
+    def projects(self):
+        return [dict(company='SampleCompany',position='SampleRole',profile='sample.md',approval='approved')]
+    def test_generic_and_menu_one_show_home(self):
+        from quick_start import parse
+        for prompt in ('开始打招呼','帮我打招呼','菜单1','菜单 1'):
+            self.assertEqual(parse(prompt,self.projects())['state'],'menu')
+    def test_menu_two_and_count_only_select_company(self):
+        from quick_start import parse
+        for prompt in ('菜单2','菜单 2','帮我打50个'):
+            result=parse(prompt,self.projects())
+            self.assertEqual((result['state'],result['selection_level']),('needs_selection','company'))
+        self.assertEqual(parse('帮我打50个',self.projects())['target'],50)
+    def test_unique_company_prefix_starts_with_requested_count(self):
+        from quick_start import parse
+        result=parse('帮我打Sample50个',self.projects())
+        self.assertEqual((result['state'],result['target']),('ready_to_start',50))
+        self.assertIn('start_direct_run',result['next_actions'])
+        self.assertNotIn('wait_for_manual_filters_and_reply_1',result['next_actions'])
+
 class GroupTests(unittest.TestCase):
     def rules(self):
         return dict(version=7,fulltext_groups=dict(a=['alpha','beta','gamma'],b=['one','two','three','4 年'],scoring='incremental',single_score=11,both_base=23,extra_points=3,cap=31,ascii_boundary=True))

@@ -8,7 +8,7 @@ Windows x64 / Codex 招聘流程工具。企业、岗位、词表、审核与专
 
 低于1.3.0的已安装版本首次升级到1.3.0时自动保存本机当前Windows用户的项目解锁信任，无需旧版本下载或密码。首次安装1.3.0不自动解锁；已有项目中显示“创新招聘组项目（已加密）”，选中后执行scripts/project_registry.py unlock --prompt。密码正确才解密并保存DPAPI本机信任；错误显示“密码错误，项目未解密。”，不解密也不保存信任；取消保持加密。仍可创建自用项目。已有信任保留。密码提示“你是谁？”。此兼容迁移不是强授权系统。
 
-普通运行先调用scripts/project_registry.py menu；选择已有或新建项目后使用quick_start.py/workflow_runner.py。首次推荐页手工确认筛选并回复1才启动实际招呼。默认single，双/三句模式需明确选择。
+普通运行先调用scripts/project_registry.py menu；选择已有或新建项目后使用quick_start.py/workflow_runner.py。通用启动和“菜单1”展示六项主菜单，“菜单2”展示企业选择。明确企业或岗位且唯一匹配的招呼指令直接启动，保留人数要求，无需再次筛选确认。默认single，双/三句模式需明确选择。
 
 更新使用验签后的scripts/skill_update.py update，镜像仅作为运输线路。旧版第一次应先执行官方可信引导，之后才能保证更新验签。系统/用户重装或本机信任密钥丢失可能需要重新解锁。
 
