@@ -38,3 +38,8 @@ python scripts/project_registry.py import --archive <名称.boss-project.zip>
 分享包只含 `manifest.json`、`project.json`、岗位 Markdown 和校验信息，不含候选人、简历、简报、账本、登录信息、Cookie、截图或日志。导入时拒绝路径穿越、符号链接、未知格式、校验失败和同名覆盖；只有用户明确确认同名覆盖后才传 `--overwrite`。导入后仍须核对招聘账号与 BOSS 页面岗位。
 
 只有选择“测试配置环境”（第5项）时才按 [标准化测试流程](standard-test.md) 运行 `scripts/standard_test.py` 和环境检测；正常投递不以这些测试为前置门槛。便携运行时存在且可用时优先使用包内 `runtime/win-x64/python/python.exe`。
+
+
+## 1.3.0 加密项目入口
+
+未解锁时，project_registry.py list将“创新招聘组项目（已加密）”作为独立入口返回，entry_type=encrypted_group；不得把它当作可投递岗位。展示该行及自建项目，不列出受保护企业或岗位。用户选择该入口后执行project_registry.py unlock --prompt，以本机遮蔽密码弹窗输入；正确解密并保存本机信任后重新list分组展示。错误显示“密码错误，项目未解密。”并保持锁定，取消也不解密。不在聊天中索取、复述或记录密码。首页项目数包含该加密组，岗位数仅统计实际可用岗位。低版本首次升级1.3.0自动迁移信任；新安装等待选择后验密。

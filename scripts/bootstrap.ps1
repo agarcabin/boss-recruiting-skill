@@ -128,10 +128,7 @@ $verify | & $python -I - $Archive $Signature $PublisherKey $stage
 if ($LASTEXITCODE -ne 0) { throw 'release_verification_failed' }
 & $python -E -s (Join-Path $stage 'scripts\skill_update.py') install-local --root $TargetRoot --archive $Archive --signature $Signature --runtime-source (Join-Path $runtimeHome 'python')
 if ($LASTEXITCODE -ne 0) { throw 'installation_failed_see_recovery_journal' }
-if ($SkipUnlock) {
-    & $python -E -s (Join-Path $TargetRoot 'scripts\project_vault.py') status
-} else {
-    & $python -E -s (Join-Path $TargetRoot 'scripts\project_vault.py') unlock --prompt
-}
-if ($LASTEXITCODE -ne 0) { throw 'project_unlock_failed' }
+& $python -E -s (Join-Path $TargetRoot 'scripts\project_vault.py') status
+if ($LASTEXITCODE -ne 0) { throw 'project_status_failed' }
+# Fresh installs unlock only after selecting the encrypted group in the project list.
 Write-Output 'installation_complete'

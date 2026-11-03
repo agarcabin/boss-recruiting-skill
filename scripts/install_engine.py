@@ -1,5 +1,5 @@
 """Recoverable filesystem installation coordinated with database run admission."""
-import json,os,shutil,sqlite3,tempfile,uuid
+import contextlib,json,os,shutil,sqlite3,tempfile,uuid
 from datetime import datetime,timezone
 from pathlib import Path,PurePosixPath
 import project_vault,run_admission,report_store
@@ -30,6 +30,14 @@ def restore(root,backup,record):
             if hashlib.sha256(data).hexdigest()!=info['sha256']:raise ValueError('restore_backup_hash_mismatch')
             atomic(path,data)
         else:path.unlink(missing_ok=True)
+    if record.get('trust_changed'):
+        trust=project_vault.trust_path()
+        if record.get('trust_existed'):
+            data=(backup/'trust-before.dpapi').read_bytes()
+            if hashlib.sha256(data).hexdigest()!=record['trust_sha256']:raise ValueError('restore_trust_hash_mismatch')
+            atomic(trust,data)
+        else:trust.unlink(missing_ok=True)
+        project_vault._cache.clear()
     if record.get('new_runtime'):
         runtime=root/'runtime/win-x64/python'
         if not runtime.resolve().is_relative_to(root) or runtime.resolve()==root:raise ValueError('unsafe_runtime_restore')
@@ -46,24 +54,24 @@ def install(root,files,backups,database=None,runtime_source=None):
     with tempfile.TemporaryDirectory(prefix='.verified-release-',dir=root.parent) as stage_dir:
         stage=Path(stage_dir)
         for name,data in files.items():atomic(stage/name,data)
-        private={}
-        if project_vault.vault_path(stage).is_file():
-            extra=[root/'SKILL.md']+list((root/'profiles').rglob('*.md')) if (root/'profiles').exists() else [root/'SKILL.md']
-            unlocked=project_vault.unlock(stage,extra=extra,apply_files=False)
-            if unlocked['state']=='unlocked':private=project_vault.safe_files(project_vault.load(stage))
-        combined={**files,**private}
-        for name in private:
-            path=target(root,name);meta=path if path.name=='project.json' else path.parent/'project.json'
-            if meta.is_file() and json.loads(meta.read_text(encoding='utf-8-sig')).get('origin')=='user':raise ValueError('user_project_collision_install_aborted')
         record=dict(root=str(root),database=str(database.resolve()),files={},new_runtime=False,state='prepared')
         atomic(backup/'installation.json',canonical(record))
         with run_admission.maintenance(database,backup/'admission.json') as ticket:
             record['had_guard']=ticket['had_guard'];record['previous']=ticket['previous']
             activation_started=False
             try:
+                private={};key=None;value=None
+                if project_vault.vault_path(stage).is_file():
+                    value=project_vault.envelope(stage)
+                    key,_=project_vault.resolve_key(value,stage,upgrade_from=root)
+                    if key is not None:private=project_vault.safe_files(project_vault.decode(value,key))
+                combined={**files,**private}
+                for name in private:
+                    path=target(root,name);meta=path if path.name=='project.json' else path.parent/'project.json'
+                    if meta.is_file() and json.loads(meta.read_text(encoding='utf-8-sig')).get('origin')=='user':raise ValueError('user_project_collision_install_aborted')
                 atomic(backup/'installation.json',canonical(record))
                 # Freeze original identities before any project file changes.
-                with sqlite3.connect(database,isolation_level=None) as db:
+                with contextlib.closing(sqlite3.connect(database,isolation_level=None)) as db:
                     db.row_factory=sqlite3.Row;report_store.backfill(db)
                 for name in combined:
                     path=target(root,name);existed=path.is_file()
@@ -81,6 +89,16 @@ def install(root,files,backups,database=None,runtime_source=None):
                     if not (source/'python.exe').is_file():raise ValueError('runtime_source_missing')
                     record['new_runtime']=True;atomic(backup/'installation.json',canonical(record))
                     shutil.copytree(filesystem_path(source),filesystem_path(root/'runtime/win-x64/python'),dirs_exist_ok=False,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
+                if key is not None:
+                    trust=project_vault.trust_path()
+                    record['trust_existed']=trust.is_file()
+                    if trust.is_file():
+                        data=trust.read_bytes();atomic(backup/'trust-before.dpapi',data)
+                        record['trust_sha256']=hashlib.sha256(data).hexdigest()
+                    record['trust_changed']=True
+                    atomic(backup/'installation.json',canonical(record))
+                    project_vault.save_trust(value['key_id'],key)
+                    project_vault._cache.clear()
                 record['state']='files_activated';atomic(backup/'installation.json',canonical(record))
             except BaseException:
                 if activation_started:restore(root,backup,record)
@@ -103,7 +121,7 @@ def recover(root,backup):
     database=Path(record['database'])
     import local_mutex
     with local_mutex.locked('install-admission:'+str(database.resolve()).casefold()):
-        with sqlite3.connect(database,isolation_level=None) as db:
+        with contextlib.closing(sqlite3.connect(database,isolation_level=None)) as db:
             db.row_factory=sqlite3.Row
             has=db.execute("SELECT 1 FROM sqlite_master WHERE name='installation_admission'").fetchone()
             state=db.execute('SELECT * FROM installation_admission WHERE id=1').fetchone() if has else None

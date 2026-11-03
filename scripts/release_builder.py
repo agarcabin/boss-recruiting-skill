@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
-VERSION='1.2.1'
+VERSION='1.3.0'
 def issuer_path():return project_vault.state_dir()/'publisher'/'issuer.dpapi'
 def issuer():
     if not issuer_path().is_file():raise ValueError('publisher_key_missing_restore_before_build')
@@ -77,6 +77,10 @@ def seal(payload,record,legacy):
                password=record['password'],legacy=[])
     for material in legacy:
         salt=os.urandom(16);item=crypto.wrap(crypto.legacy_key(material,salt),key,aad);item['salt']=crypto.b64(salt);value['legacy'].append(item)
+    salt=os.urandom(16)
+    grant=crypto.wrap(crypto.legacy_key(project_vault.UPGRADE_LABEL,salt),key,aad)
+    grant['salt']=crypto.b64(salt)
+    value['upgrade_130']=grant
     value['signature']=crypto.sign(value,crypto.raw(record['signing_key']))
     return value
 
@@ -88,7 +92,7 @@ Windows x64 / Codex 招聘流程工具。企业、岗位、词表、审核与专
 
 首次安装先从本仓库官方GitHub HTTPS入口取得可信scripts/bootstrap.ps1，再执行环境配置和验签安装。不要把未验签镜像ZIP中的引导脚本作为信任根。引导脚本内固定依赖清单摘要和发布公钥，首次运行配置用户目录下环境，不改变系统Python或PATH。
 
-首次裸装提示解密项目数据，提示为“你是谁？”。正确解密后在本机当前Windows用户下记住信任，后续更新免密。输错或跳过可自行创建项目。既有正式旧版可迁移免密；此兼容措施可被旧包持有者复现，主要防止直接浏览，不是强授权系统。
+低于1.3.0的已安装版本首次升级到1.3.0时自动保存本机当前Windows用户的项目解锁信任，无需旧版本下载或密码。首次安装1.3.0不自动解锁；已有项目中显示“创新招聘组项目（已加密）”，选中后执行scripts/project_registry.py unlock --prompt。密码正确才解密并保存DPAPI本机信任；错误显示“密码错误，项目未解密。”，不解密也不保存信任；取消保持加密。仍可创建自用项目。已有信任保留。密码提示“你是谁？”。此兼容迁移不是强授权系统。
 
 普通运行先调用scripts/project_registry.py menu；选择已有或新建项目后使用quick_start.py/workflow_runner.py。首次推荐页手工确认筛选并回复1才启动实际招呼。默认single，双/三句模式需明确选择。
 
@@ -100,13 +104,13 @@ PUBLIC_SKILL='''---
 name: boss-recruiting
 description: 本地项目管理、简历或卡片评估、受控招呼与唯一日报；项目数据加密。
 metadata:
-  version: "1.2.1"
+  version: "1.3.0"
   updated_at: "2026-11-03"
 ---
 
 # 杰博人力创新招聘组自动打招呼 Skill
 
-首次安装先运行scripts/bootstrap.ps1配置环境、验证发布签名并解锁项目。裸装输入错误或跳过时仅显示通用框架及自建项目；项目数据不从公开文档恢复。已信任或正式旧版安装自动迁移免密，密钥仅保存在当前Windows用户本地。首次升级的可信入口应从官方GitHub HTTPS获取，不能使用未验证镜像内脚本作为信任根。
+首次安装先运行scripts/bootstrap.ps1配置环境并验证发布签名。低于1.3.0的已安装版本首次升级到1.3.0时自动保存本机当前Windows用户的项目解锁信任，无需旧版本下载或密码。首次安装1.3.0不自动解锁；已有项目中显示“创新招聘组项目（已加密）”，选中后执行scripts/project_registry.py unlock --prompt。密码正确才解密并保存DPAPI本机信任；错误显示“密码错误，项目未解密。”，不解密也不保存信任；取消保持加密。仍可创建自用项目。已有信任保留。项目数据不从公开文档恢复。首次升级的可信入口应从官方GitHub HTTPS获取，不能使用未验证镜像内脚本作为信任根。
 
 ## 项目与启动
 
@@ -189,7 +193,7 @@ def build(root,output,public_root,legacy_dir=None):
     (public_root/'references/recruiting-rules.json').write_bytes(crypto.canonical(defaults))
     (public_root/'README.md').write_text(PUBLIC_README,encoding='utf-8')
     (public_root/'SKILL.md').write_text(PUBLIC_SKILL,encoding='utf-8')
-    (public_root/'CHANGELOG.md').write_text('# 版本更新日志\n\n本项目创新招聘组自用，所有项目信息已加密。\n\n## 1.2.1 — 2026-11-03\n\n- 唯一岗位日报、历史摘要兼容与安全文本写入。\n- 项目策略更新及归档合并，具体资料随加密数据分发。\n- 首次环境配置、用户本地信任、兼容迁移、发布验签与安装恢复。\n- 清理公开项目资料；历史运行与用户项目保留。\n\n历史项目细节已移出公开日志，本地备份保留。\n',encoding='utf-8')
+    (public_root/'CHANGELOG.md').write_text('# 版本更新日志\n\n本项目创新招聘组自用，所有项目信息已加密。\n\n## 1.3.0 — 2026-11-03\n\n- 低版本首次升级自动记住本机信任，无需旧包。\n- 首次安装显示加密项目入口，选择后验密；错误不解密、不保存信任。\n\n## 1.2.1 — 2026-11-03\n\n- 唯一岗位日报、历史摘要兼容与安全文本写入。\n- 项目策略更新及归档合并，具体资料随加密数据分发。\n- 首次环境配置、用户本地信任、兼容迁移、发布验签与安装恢复。\n- 清理公开项目资料；历史运行与用户项目保留。\n\n历史项目细节已移出公开日志，本地备份保留。\n',encoding='utf-8')
     (public_root/'references/evaluation-modes.md').write_text(GENERIC_EVALUATION,encoding='utf-8')
     from public_docs import DOCS
     for name,text in DOCS.items():(public_root/'references'/name).write_text(text,encoding='utf-8')

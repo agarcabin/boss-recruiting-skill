@@ -54,7 +54,7 @@ record共用字段：candidate_id、candidate_name、started_at（含时区）�
 
 首次从官方GitHub HTTPS仓库页面取得固定提交的scripts/bootstrap.ps1。该脚本固定依赖清单SHA-256与Ed25519公钥；依赖清单先用PowerShell/.NET校验，再下载、核验并配置独立Python及固定哈希的轮子，最后验证ZIP签名。镜像只运输字节，未验证ZIP中的bootstrap不能作为首次信任根。脚本配置用户目录环境，不修改系统PATH或Python。默认安装到用户.codex/skills/boss-recruiting。
 
-首次裸装配置环境后提示解密，密码提示“你是谁？”。输错/取消不显示内置资料，仍可创建origin=user项目；以后执行project_vault.py unlock --prompt可主动解锁。正确解密在当前Windows用户本地DPAPI保存数据密钥，后续免密。正式旧版通过原文件自动兼容迁移；旧包持有者可复现该兼容路径，因此不是强授权系统。
+低于1.3.0的已安装版本首次升级到1.3.0时自动保存本机当前Windows用户的项目解锁信任，无需旧版本下载或密码。首次安装1.3.0不自动解锁；已有项目中显示“创新招聘组项目（已加密）”，选中后执行scripts/project_registry.py unlock --prompt。密码正确才解密并保存DPAPI本机信任；错误显示“密码错误，项目未解密。”，不解密也不保存信任；取消保持加密。仍可创建自用项目。已有信任保留。密码提示“你是谁？”。兼容迁移以本地安装状态为依据，属于便捷信任，不是强授权系统。
 
 菜单第4项运行 runtime/win-x64/python/python.exe scripts/skill_update.py update。check只检查。最新正式Release须同时包含ZIP、同名.zip.sha256、同名.zip.sig；先验签再解包，再检查清单、哈希、版本与路径。公开下载不需账号；直连失败可走update-source.json备用前缀，认证失败不信任该内容。失败保留原安装并显示原因，不无限重试。
 

@@ -8,6 +8,55 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 ROOT=Path(__file__).resolve().parents[1]
 _cache={}
 MAX_BYTES=16*1024*1024
+UPGRADE_LABEL=b'recruiting-installed-before-1.3.0/v1'
+
+try:sys.stdout.reconfigure(encoding='utf-8')
+except (AttributeError,OSError):pass
+
+
+def upgrade_key(value,old_root,new_root):
+    """One-time 1.3.0 compatibility grant for an existing older installation."""
+    import skill_update
+    old_root=Path(old_root);new_root=Path(new_root)
+    if not (old_root/'SKILL.md').is_file():return None
+    try:
+        old=skill_update.version_key(skill_update.installed_version(old_root))
+        new=skill_update.version_key(skill_update.installed_version(new_root))
+    except ValueError:return None
+    if not ((0,0,0)<old<(1,3,0) and new==(1,3,0)):return None
+    grant=value.get('upgrade_130')
+    if not grant:return None
+    return crypto.unwrap(crypto.legacy_key(UPGRADE_LABEL,crypto.raw(grant['salt'])),grant,value['key_id'].encode())
+
+
+def resolve_key(value,root=None,password=None,allow_legacy=False,extra=(),upgrade_from=None):
+    saved=read_trust().get(value['key_id'])
+    if saved:
+        try:
+            key=crypto.raw(saved);decode(value,key)
+            return key,'trusted'
+        except (ValueError,InvalidTag):pass
+    if upgrade_from is not None:
+        key=upgrade_key(value,upgrade_from,root)
+        if key is not None:
+            decode(value,key)
+            return key,'upgrade_130'
+    if allow_legacy:
+        for material in legacy_materials(root,extra):
+            for item in value.get('legacy',[]):
+                try:
+                    key=crypto.unwrap(crypto.legacy_key(material,crypto.raw(item['salt'])),item,value['key_id'].encode())
+                    decode(value,key)
+                    return key,'legacy'
+                except (ValueError,InvalidTag):pass
+    if password is not None:
+        item=value['password']
+        try:
+            key=crypto.unwrap(crypto.password_key(password,crypto.raw(item['salt'])),item,value['key_id'].encode())
+            decode(value,key)
+            return key,'password'
+        except (ValueError,InvalidTag):return None,'incorrect_password'
+    return None,'password_required'
 
 def state_dir():
     return Path(os.environ.get('BOSS_STATE_DIR',str(Path(os.environ.get('LOCALAPPDATA',str(Path.home())))/'Codex/recruiting-greetings')))
@@ -137,27 +186,13 @@ def apply(data,root=None,backup=None,ticket=None):
     crypto.atomic(state_dir()/'trust'/'applied.json',crypto.canonical(dict(root=str(root.resolve()),vault_sha256=hashlib.sha256(vault_path(root).read_bytes()).hexdigest())))
     return len(files)
 
-def unlock(root=None,password=None,allow_legacy=True,extra=(),apply_files=True):
+def unlock(root=None,password=None,allow_legacy=False,extra=(),apply_files=True,upgrade_from=None):
     root=Path(root) if root else ROOT
     if not vault_path(root).is_file():return dict(state='development_source')
-    value=envelope(root);aad=value['key_id'].encode();saved=read_trust().get(value['key_id']);key=None
-    source='trusted'
-    if saved:
-        try:key=crypto.raw(saved);decode(value,key)
-        except (ValueError,InvalidTag):key=None
-    if key is None and allow_legacy:
-        for material in legacy_materials(root,extra):
-            for item in value.get('legacy',[]):
-                try:key=crypto.unwrap(crypto.legacy_key(material,crypto.raw(item['salt'])),item,aad);source='legacy';break
-                except (ValueError,InvalidTag):
-                    # Only authentication failures are expected here; key material is never logged.
-                    key=None
-            if key is not None:break
-    if key is None and password is not None:
-        item=value['password']
-        try:key=crypto.unwrap(crypto.password_key(password,crypto.raw(item['salt'])),item,aad);source='password'
-        except (ValueError,InvalidTag):return dict(state='locked',reason='incorrect_password',hint='你是谁？')
-    if key is None:return dict(state='locked',reason='password_required',hint='你是谁？')
+    value=envelope(root)
+    key,source=resolve_key(value,root,password,allow_legacy,extra,upgrade_from)
+    if key is None:
+        return dict(state='locked',reason=source,hint='你是谁？',message='密码错误，项目未解密。' if source=='incorrect_password' else '请选择创新招聘组项目（已加密）并输入密码。')
     data=decode(value,key)
     if apply_files:
         import run_admission
@@ -176,6 +211,30 @@ def unlock(root=None,password=None,allow_legacy=True,extra=(),apply_files=True):
     else:save_trust(value['key_id'],key)
     _cache.clear()
     return dict(state='unlocked',source=source,key_id=value['key_id'])
+
+
+def migrate_installed_upgrade(root=None):
+    """Older updaters activate the new code before it can interpret the grant."""
+    root=Path(root) if root else ROOT
+    if not vault_path(root).is_file() or load(root) is not None:return None
+    import skill_update
+    if skill_update.version_key(skill_update.installed_version(root))!=(1,3,0):return None
+    records=[]
+    for file in (state_dir()/'updates/backups').glob('*/installation.json'):
+        try:
+            record=json.loads(file.read_text(encoding='utf-8'))
+            if Path(record['root']).resolve()==root.resolve():
+                records.append((file.stat().st_mtime_ns,file,record))
+        except (OSError,ValueError,KeyError):continue
+    if not records:return None
+    _,file,record=max(records,key=lambda item:(item[0],str(item[1])))
+    info=record.get('files',{}).get('SKILL.md',{})
+    # A newer fresh install or incomplete/rolled-back update cancels older receipts.
+    if record.get('state')!='complete' or not info.get('existed'):return None
+    previous=file.parent/'SKILL.md'
+    if not previous.is_file() or hashlib.sha256(previous.read_bytes()).hexdigest()!=info.get('sha256'):return None
+    if upgrade_key(envelope(root),file.parent,root) is None:return None
+    return unlock(root,upgrade_from=file.parent)
 
 def readable(profile):
     profile=Path(profile);meta=profile.parent/'project.json'
@@ -202,7 +261,8 @@ def main():
     parser.add_argument('--password-prompt',action='store_true')
     args=parser.parse_args()
     try:
-        result=dict(state='unlocked' if load(args.root) else 'locked') if args.command=='status' else unlock(args.root,allow_legacy=True,extra=args.legacy_file)
+        migrate_installed_upgrade(args.root)
+        result=dict(state='unlocked' if load(args.root) else 'locked') if args.command=='status' else unlock(args.root)
         if result['state']=='locked' and args.command=='unlock':
             password=None
             if args.password_stdin:password=sys.stdin.readline().rstrip('\r\n')

@@ -65,10 +65,27 @@ def latest_run_readonly(db_path: Path | None = None):
     return runs[0] if runs else None
 
 
-def build_home_menu(projects, latest_run, metadata=None):
+def encrypted_entry(root=PROJECTS_ROOT):
+    import project_vault
+    skill_root=Path(root).resolve().parent
+    if not project_vault.vault_path(skill_root).is_file():return None
+    if project_vault.load(skill_root) is not None:return None
+    return dict(project_id='encrypted-innovation-recruiting',entry_type='encrypted_group',
+                company='创新招聘组项目',display_name='创新招聘组项目（已加密）',
+                state='locked',select_action='unlock',password_required=True)
+
+
+def project_listing(root=PROJECTS_ROOT):
+    projects=list_projects(root);locked=encrypted_entry(root)
+    return dict(items=([locked] if locked else [])+projects,
+                project_count=len({str(p['company']) for p in projects})+bool(locked),
+                position_count=len(projects),encrypted_group_present=bool(locked))
+
+
+def build_home_menu(projects, latest_run, metadata=None, locked_entry=None):
     if latest_run and not any(str(item.get('profile'))==str(latest_run.get('profile_path')) for item in projects):latest_run=None
     metadata=metadata if metadata is not None else installed_metadata()
-    project_count=len({str(p['company']) for p in projects})
+    project_count=len({str(p['company']) for p in projects})+bool(locked_entry)
     position_count=len(projects)
     if latest_run:
         states={'running':'运行中','paused':'已暂停','login_required':'需要登录',
@@ -296,6 +313,10 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("list")
     commands.add_parser("menu")
+    unlock = commands.add_parser("unlock",help="Select 创新招聘组项目（已加密） and unlock it")
+    unlock_input=unlock.add_mutually_exclusive_group()
+    unlock_input.add_argument("--prompt",action="store_true")
+    unlock_input.add_argument("--password-stdin",action="store_true")
     register = commands.add_parser("register")
     register.add_argument("--profile", type=Path, required=True)
     register.add_argument("--project-id", default="")
@@ -307,13 +328,20 @@ def main() -> None:
     importer.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
     try:
+        if args.command in ('list','menu','unlock'):
+            import project_vault
+            project_vault.migrate_installed_upgrade(args.root.resolve().parent)
         if args.command == "list":
-            items=list_projects(args.root)
-            output(state="projects", items=items,**installed_metadata(),
-                   project_count=len({str(item['company']) for item in items}),position_count=len(items),
+            output(state="projects", **project_listing(args.root),**installed_metadata(),
                    menu_item_1='1. 继续上次项目（企业｜岗位；运行状态，成功招呼 x 人）')
         elif args.command == "menu":
-            output(**build_home_menu(list_projects(args.root),latest_run_readonly(args.db)))
+            output(**build_home_menu(list_projects(args.root),latest_run_readonly(args.db),locked_entry=encrypted_entry(args.root)))
+        elif args.command == "unlock":
+            import subprocess
+            command=[sys.executable,str(SKILL_ROOT/'scripts/project_vault.py'),'unlock','--root',str(args.root.resolve().parent)]
+            if args.prompt:command.append('--prompt')
+            if args.password_stdin:command.append('--password-stdin')
+            raise SystemExit(subprocess.run(command).returncode)
         elif args.command == "register":
             output(state="registered", project=register_project(args.profile, args.project_id))
         elif args.command == "export":
