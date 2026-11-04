@@ -145,3 +145,73 @@ def append_results(wb,db,stamp,profile,rows):
 def pending(db,stamp,profile):
     row=db.execute('SELECT pending FROM report_destinations WHERE day=? AND job=?',(day(stamp),for_profile(db,profile)['job'])).fetchone()
     return bool(row and row[0])
+
+
+def daily_summary(db, profile, stamp, rows, at=None):
+    """One job/day, including opened cards that have no final assessment yet."""
+    import ledger
+    identity = for_profile(db, profile)
+    date = day(stamp)
+    start = datetime.fromisoformat(date).replace(tzinfo=ZONE)
+    finish = start + timedelta(days=1)
+    current = at or ledger.now()
+    viewed = {(r['run_id'], r['candidate_hash']) for r in rows}
+    for row in db.execute('''SELECT p.* FROM candidate_progress p
+            JOIN run_identity i ON i.run_id=p.run_id WHERE i.job=?''', (identity['job'],)):
+        if day(row['started_at']) == date:
+            viewed.add((row['run_id'], row['candidate_hash']))
+    elapsed = 0
+    unavailable = False
+    for row in db.execute('''SELECT r.run_id,r.started_at,c.state,c.updated_at,c.paused_at,c.paused_seconds
+            FROM runs r JOIN run_identity i ON i.run_id=r.run_id
+            LEFT JOIN run_control c ON c.run_id=r.run_id WHERE i.job=?''', (identity['job'],)):
+        begun = datetime.fromisoformat(row['started_at'])
+        end = datetime.fromisoformat(row['updated_at']) if row['state'] == 'stopped' else current
+        left, right = max(start, begun), min(finish, end)
+        if right <= left:
+            continue
+        paused = int(row['paused_seconds'] or 0)
+        if row['state'] == 'paused':
+            pause_start = datetime.fromisoformat(row['paused_at'] or row['updated_at'])
+            paused += max(0, int((end - pause_start).total_seconds()))
+        if paused and (begun < start or end > finish):
+            # Old ledgers store only the cumulative pause length, not its day.
+            unavailable = True
+        else:
+            elapsed += max(0, int((right-left).total_seconds())-paused)
+    return dict(viewed=len(viewed), sent=sum(r['actual_send_status']=='sent' for r in rows),
+                elapsed_seconds=None if unavailable else elapsed, **identity)
+
+
+def add_summary_header(ws, db, profile, stamp, rows, at=None):
+    import ledger, skill_update
+    from openpyxl.styles import Alignment, Font, PatternFill
+    current = at or ledger.now()
+    metrics = daily_summary(db, profile, stamp, rows, current)
+    seconds = metrics['elapsed_seconds']
+    duration = (f'{seconds//3600} 小时 {seconds%3600//60} 分钟 {seconds%60} 秒'
+                if seconds is not None else '暂无（跨日暂停记录不足）')
+    speed = (f"{seconds/metrics['viewed']:.2f} 秒/人"
+             if seconds is not None and metrics['viewed'] else '暂无')
+    version = skill_update.installed_version(Path(__file__).resolve().parents[1])
+    ws.insert_rows(1, 5)
+    for cells in ws.iter_rows(min_row=6):
+        for cell in cells:
+            if cell.hyperlink:
+                cell.hyperlink.ref = cell.coordinate
+    texts = [f"目标岗位：{metrics['company']} {metrics['position']}",
+             f"共查看 {metrics['viewed']} 人，打招呼了 {metrics['sent']} 人",
+             f'总用时 {duration}，平均速度 {speed}',
+             f"载体版本：v{version}，更新日期：{current.astimezone(ZONE):%Y-%m-%d %H:%M:%S}"]
+    for number, text in enumerate(texts, 1):
+        ws.merge_cells(start_row=number, start_column=1, end_row=number, end_column=ws.max_column)
+        cell = ws.cell(number, 1, text)
+        cell.alignment = Alignment(vertical='center', wrap_text=True)
+        cell.font = Font(name='微软雅黑', size=14 if number==1 else 11,
+                         bold=number in (1,2), color='FFFFFF' if number==1 else '20364D')
+        cell.fill = PatternFill('solid', fgColor='26496A' if number==1 else 'EDF3F8')
+        ws.row_dimensions[number].height = 32 if number==1 else 28
+    ws.freeze_panes = 'C7'
+    ws.auto_filter.ref = f'A6:{ws.cell(ws.max_row, ws.max_column).coordinate}'
+    ws.print_title_rows = '1:6'
+    return metrics

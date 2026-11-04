@@ -31,7 +31,9 @@ def confirmed_sent(row):
 
 def projected_counts(db,profile,at):
     data=rows(db,profile,at)
-    return dict(viewed=len(data),sent=sum(confirmed_sent(row) for row in data),pending=sum(bool(not row['report_written'] or (row['actual_send_status'] and row['send_status']!=row['actual_send_status'])) for row in data))
+    import report_store
+    metrics=report_store.daily_summary(db,profile,at,data)
+    return dict(viewed=metrics['viewed'],sent=metrics['sent'],pending=sum(bool(not row['report_written'] or (row['actual_send_status'] and row['send_status']!=row['actual_send_status'])) for row in data))
 
 
 def workbook_counts(path):
@@ -43,6 +45,10 @@ def workbook_counts(path):
     wb=load_workbook(path,read_only=False,data_only=True)
     try:
         ws=wb['候选人简报']; viewed=sent=0
+        import re
+        headline=re.fullmatch(r'共查看 (\d+) 人，打招呼了 (\d+) 人',str(ws['A2'].value or ''))
+        if headline:
+            return dict(viewed=int(headline[1]),sent=int(headline[2]))
         for row in ws.iter_rows(min_row=2):
             if len(row)<2 or not row[1].value: continue
             viewed+=1

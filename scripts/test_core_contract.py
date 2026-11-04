@@ -69,6 +69,10 @@ class AdmissionTests(unittest.TestCase):
                 raise RuntimeError('fixture failure')
         with run_admission.maintenance(self.file,Path(self.temp.name)/'journal2.json'):pass
         self.assertEqual(self.db.execute('SELECT maintenance FROM installation_admission').fetchone()[0],0)
+    def test_install_activates_target_version_instead_of_loaded_old_module(self):
+        with run_admission.maintenance(self.file,Path(self.temp.name)/'journal.json',build_id='9.9.9'):
+            pass
+        self.assertEqual(self.db.execute('SELECT build_id FROM installation_admission').fetchone()[0],'9.9.9')
 
 class DestinationTests(unittest.TestCase):
     def setUp(self):

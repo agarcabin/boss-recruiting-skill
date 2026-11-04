@@ -328,6 +328,7 @@ def _render_workbook(db, root: Path, started_at: str, filename: str | None = Non
         details.column_dimensions[letter].width = min(
             52, max(13, max(len(str(c.value or "")) for c in col[:100]) + 2)
         )
+    report_store.add_summary_header(summary,db,profile_path,started_at,rows)
     import resume_diagnostics
     resume_diagnostics.append_sheet(wb,db,profile_path,started_at,run_id=run_id,report_rows=rows)
     report_store.append_results(wb,db,started_at,profile_path,rows)

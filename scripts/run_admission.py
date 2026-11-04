@@ -3,7 +3,7 @@ import contextlib,json,sqlite3
 from pathlib import Path
 import local_mutex
 
-BUILD_ID='1.3.1'
+BUILD_ID='1.3.2'
 
 def path(db):return str(Path(db.execute('PRAGMA database_list').fetchone()[2]).resolve())
 def key(db):return 'install-admission:'+path(db).casefold()
@@ -45,7 +45,7 @@ def start(db):
         except BaseException:db.rollback();raise
 
 @contextlib.contextmanager
-def maintenance(database,journal):
+def maintenance(database,journal,build_id=None):
     database=Path(database);database.parent.mkdir(parents=True,exist_ok=True)
     db=sqlite3.connect(database,timeout=25,isolation_level=None);db.row_factory=sqlite3.Row
     ticket=dict(restored=False,previous=None,had_guard=False)
@@ -70,10 +70,11 @@ def maintenance(database,journal):
             except BaseException:db.rollback();raise
             try:
                 yield ticket
-                atomic(Path(journal),canonical(dict(state='activation_ready',database=str(database),previous=ticket['previous'],had_guard=ticket['had_guard'],build_id=BUILD_ID)))
+                activated_build=build_id or BUILD_ID
+                atomic(Path(journal),canonical(dict(state='activation_ready',database=str(database),previous=ticket['previous'],had_guard=ticket['had_guard'],build_id=activated_build)))
                 db.execute('BEGIN IMMEDIATE')
                 assert_idle(db)
-                db.execute('UPDATE installation_admission SET build_id=?,maintenance=0,journal=NULL WHERE id=1',(BUILD_ID,))
+                db.execute('UPDATE installation_admission SET build_id=?,maintenance=0,journal=NULL WHERE id=1',(activated_build,))
                 db.commit()
                 # Activation is committed; a cosmetic journal write must not initiate rollback.
                 try:atomic(Path(journal),canonical(dict(state='complete',database=str(database))))

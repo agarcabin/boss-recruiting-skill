@@ -56,7 +56,8 @@ def install(root,files,backups,database=None,runtime_source=None):
         for name,data in files.items():atomic(stage/name,data)
         record=dict(root=str(root),database=str(database.resolve()),files={},new_runtime=False,state='prepared')
         atomic(backup/'installation.json',canonical(record))
-        with run_admission.maintenance(database,backup/'admission.json') as ticket:
+        activated_build=json.loads(files[skill_update.MANIFEST])['version']
+        with run_admission.maintenance(database,backup/'admission.json',build_id=activated_build) as ticket:
             record['had_guard']=ticket['had_guard'];record['previous']=ticket['previous']
             activation_started=False
             try:

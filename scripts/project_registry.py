@@ -79,7 +79,8 @@ def project_listing(root=PROJECTS_ROOT):
     projects=list_projects(root);locked=encrypted_entry(root)
     return dict(items=([locked] if locked else [])+projects,
                 project_count=len({str(p['company']) for p in projects})+bool(locked),
-                position_count=len(projects),encrypted_group_present=bool(locked))
+                position_count=len(projects),encrypted_group_present=bool(locked),
+                company_sorting=company_order_status(projects))
 
 
 def build_home_menu(projects, latest_run, metadata=None, locked_entry=None):
@@ -178,7 +179,7 @@ def register_project(profile: Path, project_id: str = "") -> dict[str, object]:
     requested_id = project_id.strip() or str(existing.get("project_id", ""))
     digest = normalized_project_id(requested_id, str(project["company"]), str(project["position"]))
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    metadata = {**{key:existing[key] for key in ("candidate_namespace","evaluation_mode","trigger_policy","display_order","origin","active","retired","rules") if key in existing}, "format": PACKAGE_FORMAT, "project_id": digest,
+    metadata = {**{key:existing[key] for key in ("candidate_namespace","evaluation_mode","trigger_policy","display_order","company_added_at","company_display_order","origin","active","retired","rules") if key in existing}, "format": PACKAGE_FORMAT, "project_id": digest,
                 "company": project["company"], "position": project["position"], "greeting_mode": project["greeting_mode"],
                 "profile_schema": "boss-greeting-profile/v1", "profile": profile.name,
                 "created_at": existing.get("created_at", stamp), "updated_at": stamp}
@@ -200,7 +201,62 @@ def list_projects(root: Path = PROJECTS_ROOT) -> list[dict[str, object]]:
             projects.append(read_project(profile))
         except (OSError, ValueError):
             continue
-    return sorted(projects, key=lambda item: (str(item["company"]).casefold(), int(json.loads(Path(str(item["metadata"])).read_text(encoding="utf-8-sig")).get("display_order",999)) if Path(str(item["metadata"])).is_file() else 999, str(item["position"]).casefold()))
+    return sort_projects(projects)
+
+
+def sort_projects(projects):
+    """Company first-added time desc; explicit rank resolves missing/tied dates."""
+    metadata = {}
+    companies = {}
+    for item in projects:
+        path = Path(str(item['metadata']))
+        value = json.loads(path.read_text(encoding='utf-8-sig')) if path.is_file() else {}
+        metadata[str(path)] = value
+        group = companies.setdefault(str(item['company']), dict(times=[], ranks=[]))
+        try:
+            stamp = datetime.fromisoformat(value.get('company_added_at') or value.get('created_at', ''))
+            if stamp.tzinfo is not None:
+                group['times'].append(stamp.timestamp())
+        except (TypeError, ValueError):
+            pass
+        if value.get('company_display_order') is not None:
+            group['ranks'].append(int(value['company_display_order']))
+
+    manual_all = (any(not group['times'] for group in companies.values())
+                  and all(group['ranks'] for group in companies.values()))
+
+    def key(item):
+        company = str(item['company'])
+        group = companies[company]
+        # Adding another job must not move an already established company.
+        added = min(group['times']) if group['times'] else None
+        rank = min(group['ranks']) if group['ranks'] else 999
+        value = metadata[str(item['metadata'])]
+        return ((rank if manual_all else added is None), (0 if manual_all else -(added or 0)), rank, company.casefold(),
+                int(value.get('display_order', 999)), str(item['position']).casefold())
+
+    return sorted(projects, key=key)
+
+
+def company_order_status(projects):
+    times = {}
+    manual = set()
+    for item in projects:
+        group = times.setdefault(str(item['company']), [])
+        path = Path(str(item['metadata']))
+        value = json.loads(path.read_text(encoding='utf-8-sig')) if path.is_file() else {}
+        if value.get('company_display_order') is not None:
+            manual.add(str(item['company']))
+        try:
+            stamp = datetime.fromisoformat(value.get('company_added_at') or value.get('created_at', ''))
+            if stamp.tzinfo is not None:
+                group.append(stamp.timestamp())
+        except (ValueError, TypeError):
+            pass
+    return dict(rule='company_first_added_desc',
+                missing_added_at=[company for company, stamps in times.items() if not stamps],
+                requires_manual_order=any(not stamps for stamps in times.values()) and len(manual)!=len(times),
+                manual_order_field='company_display_order')
 
 
 def sha256(data: bytes) -> str:
