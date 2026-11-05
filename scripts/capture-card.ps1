@@ -5,6 +5,8 @@ $OutputEncoding = [Text.UTF8Encoding]::new($false)
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+. (Join-Path $PSScriptRoot 'boss-browser-binding.ps1')
+
 Add-Type -AssemblyName System.Drawing
 Add-Type @'
 using System; using System.Runtime.InteropServices;
@@ -12,11 +14,11 @@ public class CardNative { [DllImport("user32.dll")] public static extern IntPtr 
 '@
 [void][CardNative]::SetProcessDPIAware()
 if(!$NoImage -and [CardNative]::GetForegroundWindow().ToInt64() -ne $WindowHandle){throw 'boss_window_not_foreground'}
-$root=[System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$WindowHandle)
+$root=(Get-BossBrowserRoot $WindowHandle)
 $docCondition=[System.Windows.Automation.AndCondition]::new(
  [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Document),
  [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,'BOSS直聘'))
-$docs=$root.FindAll([System.Windows.Automation.TreeScope]::Descendants,$docCondition)
+$docs=(Get-BossDocuments $root)
 $document=$null;$url=$null
 foreach($doc in $docs){$pattern=$null;if($doc.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern,[ref]$pattern)){$value=$pattern.Current.Value;if($value -like 'https://www.zhipin.com/web/chat/recommend*'){$document=$doc;$url=$value;break}}}
 if(!$document){throw 'recommend_document_not_found'}
@@ -58,6 +60,8 @@ $observation=@{name=$CandidateName;card=$fields;raw_text=$text;observed_at=[Date
 $directory=[IO.Path]::GetFullPath($OutputDirectory);[IO.Directory]::CreateDirectory($directory)|Out-Null
 if(!$NoImage){
  $bitmap=[Drawing.Bitmap]::new([int]$rect.Width,[int]$rect.Height);$graphics=[Drawing.Graphics]::FromImage($bitmap)
+ $null=Get-BossBrowserRoot ([long]$WindowHandle)
+ Assert-BossForeground
  try {$graphics.CopyFromScreen([int]$rect.X,[int]$rect.Y,0,0,$bitmap.Size);$bitmap.Save((Join-Path $directory 'card.png'),[Drawing.Imaging.ImageFormat]::Png)}finally{$graphics.Dispose();$bitmap.Dispose()}
 }
 $observation.image_saved=!$NoImage

@@ -84,7 +84,14 @@ def workflow_detail(db,run_id,state,active,elapsed):
                 assess='正在分析电子简历' if mode!='card' else '正在分析列表名片',send='正在打招呼',
                 verify='正在核验招呼结果',followups='正在发送后续话术',favorite='正在处理收藏',
                 finish='正在整理记录与报告',next='正在切换下一位候选人',complete='正在结束本轮')
+            labels.update(worker_list='正在匹配列表关键词',worker_open='正在打开电子简历',worker_read='正在匹配简历全文')
             label=labels.get(row['phase'],current_step(db,state,active))
+            if row['phase']=='next':
+                import short_view_wait
+                wait=payload.get('short_view_wait') or {}
+                if wait.get('retry_at') and short_view_wait.enabled(db,run_id):
+                    remaining=max(0,math.ceil((ledger.parse_time(wait['retry_at'])-ledger.now()).total_seconds()))
+                    if remaining:label=f'短查看随机等待：剩余 {remaining} 秒'
             name=payload.get('candidate',{}).get('candidate_name') or '姓名未知'
             seconds=max(0,elapsed-int(payload.get('phase_started_elapsed',elapsed)))
             return f'{label} - {name} - {seconds} 秒'
@@ -272,7 +279,7 @@ def snapshot(db: sqlite3.Connection, run_id: str, output_root=None) -> dict:
         if workflow and workflow['phase']=='send' and json.loads(workflow['payload']).get('rate_limit'):
             import greeting_rate
             rate=greeting_rate.status(db)
-            if rate['state']=='rate_limited':step=f"速度控制：等待{rate['retry_after_seconds']}秒后继续（10人/5分钟）"
+            if rate['state']=='rate_limited':step=f"速度控制：等待{rate['retry_after_seconds']}秒后继续（10人/10分钟）"
     return {"state": state, "elapsed": f"{elapsed // 3600:02d}:{elapsed % 3600 // 60:02d}:{elapsed % 60:02d}",
             "current_step": step, "drain_reason":drain_reason,
             "current": active["ordinal"] if active else None, "started": progress["started"],
@@ -458,6 +465,12 @@ class ProgressWindow:
         self.button_canvas.tag_bind("button-1", "<Button-1>", lambda _e: self.stop())
         self.button_canvas.tag_bind("button-2", "<Button-1>", lambda _e: self.open_report())
 
+        import short_view_wait
+        with contextlib.closing(ledger.connect(self.db_path)) as db:
+            selected=short_view_wait.enabled(db,self.run_id)
+        self.short_wait_var=tk.BooleanVar(value=selected)
+        self.short_wait_check=tk.Checkbutton(root,text='短查看随机等待',variable=self.short_wait_var,command=self.toggle_short_wait,bg=PANEL_BG,fg=PANEL_MUTED,selectcolor=PANEL_BG,activebackground=PANEL_BG,activeforeground=PANEL_FG,font=('Microsoft YaHei UI',8),borderwidth=0,highlightthickness=0)
+        self.short_wait_check.place(x=round(TEXT_LEFT/self.ui_scale),y=round(61/self.ui_scale))
         root.update_idletasks()
         self.button_window.update_idletasks()
         configure_overlay_windows(root, self.button_window)
@@ -465,6 +478,11 @@ class ProgressWindow:
         self.button_window.protocol("WM_DELETE_WINDOW", self.stop)
         self.keep_codex_maximized()
         self.refresh()
+
+    def toggle_short_wait(self):
+        import short_view_wait
+        with contextlib.closing(ledger.connect(self.db_path)) as db:
+            short_view_wait.set_enabled(db,self.run_id,self.short_wait_var.get())
 
     def _hover_button(self, index: int, hovering: bool) -> None:
         enabled = self.button_enabled[index]

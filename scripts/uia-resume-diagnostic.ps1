@@ -9,6 +9,8 @@ $ErrorActionPreference = "Stop"
 
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+. (Join-Path $PSScriptRoot 'boss-browser-binding.ps1')
+
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type @"
 using System;
@@ -21,7 +23,7 @@ public static class ResumeDiagnosticMouse {
 "@
 
 [void][ResumeDiagnosticMouse]::SetProcessDpiAwarenessContext([IntPtr](-4))
-$root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$WindowHandle)
+$root = (Get-BossBrowserRoot $WindowHandle)
 $documentCondition = New-Object System.Windows.Automation.PropertyCondition(
     [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
     [System.Windows.Automation.ControlType]::Document
@@ -115,12 +117,9 @@ function Get-RawSubtree($Element, [int]$Limit, [int]$DepthLimit) {
 }
 
 function Find-ResumeDocument {
-    $documents = $root.FindAll(
-        [System.Windows.Automation.TreeScope]::Descendants,
-        $documentCondition
-    )
+    $documents = (Get-BossDocuments $root)
     for ($index = 0; $index -lt $documents.Count; $index++) {
-        $document = $documents.Item($index)
+        $document = $documents[$index]
         $valuePattern = $null
         if ($document.TryGetCurrentPattern(
             [System.Windows.Automation.ValuePattern]::Pattern,
@@ -135,7 +134,11 @@ function Find-ResumeDocument {
 function Click-Point([int]$X, [int]$Y) {
     [void][ResumeDiagnosticMouse]::SetCursorPos($X, $Y)
     Start-Sleep -Milliseconds 100
+    $null=Get-BossBrowserRoot ([long]$WindowHandle)
+    Assert-BossPointer
     [ResumeDiagnosticMouse]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+    $null=Get-BossBrowserRoot ([long]$WindowHandle)
+    Assert-BossPointer
     [ResumeDiagnosticMouse]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
     Start-Sleep -Milliseconds 200
 }

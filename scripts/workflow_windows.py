@@ -9,6 +9,7 @@ from workflow_paths import workflow_dir
 class WindowsAdapter:
     def __init__(self,db,run,root,hwnd=None,allow_ocr=True):
         self.db,self.run,self.root,self.hwnd=db,run,Path(root),hwnd
+        self.processed=[]
         self.allow_ocr=allow_ocr;self.observations={};self.detail_open=False
         self.folder=workflow_dir(run)
 
@@ -40,6 +41,14 @@ class WindowsAdapter:
 
     def select(self,processed):
         self.processed=processed
+        if not getattr(self,'page_job_recorded',False):
+            observed=self.query('PageJob')
+            _,_,fields=ledger.profile_check(Path(ledger.run_row(self.db,self.run)['profile_path']))
+            display=observed.get('display_name')
+            observed['name_mismatch']=bool(display and not all(fields[k] in display for k in ('company','position')))
+            observed['warning']='页面岗位/公司名称与skill不同，按人工选择继续' if observed['name_mismatch'] else None
+            self.db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',('boss_page_job/'+self.run,json.dumps(observed,ensure_ascii=False)))
+            self.page_job_recorded=True
         for attempt in range(3):
             result=self.query('Select',processed=processed)
             if result['state']=='candidate':
@@ -51,7 +60,7 @@ class WindowsAdapter:
 
     def open(self,candidate,mode):
         self.hwnd=candidate.get('hwnd',self.hwnd)
-        if mode=='resume':
+        if mode in ('resume','worker_resume'):
             if not candidate.get('already_open'):
                 if not candidate.get('open_target'):raise ValueError('resume_open_control_not_available')
                 self.invoke(candidate['open_target'])
@@ -102,10 +111,23 @@ class WindowsAdapter:
         if mode=='card':
             observation,path,image=self.observations[candidate['candidate_id']]
             return dict(card=observation['card'],card_evidence=dict(image=str(image),uia_json=str(path)))
-        data=self.query('Resume');text=data.get('keyword_text','')
-        result=dict(keyword_text=text,read_source=data.get('source','directed_resume_uia'))
         rules=recruiting_rules.run_rules(ledger.run_row(self.db,self.run))
-        if fast_assessment.evaluate(rules,result,recruiting_rules.positive_hits):
+        data=None;warning=None
+        for attempt in range(2):
+            try:
+                data=self.query('ResumeFull' if mode=='worker_resume' or recruiting_rules.is_domain(rules) else 'Resume');break
+            except (RuntimeError,subprocess.TimeoutExpired) as exc:
+                # Origin/binding failures require rebind, never classify as a bad resume.
+                if any(code in str(exc) for code in ('codex_iab','external_browser','target_outside','boss_document_unavailable')):raise
+                if not isinstance(exc,subprocess.TimeoutExpired) and not any(code in str(exc) for code in ('resume_scroll_scope_ambiguous','resume_scroll','ElementNotAvailable','element is not available','Scroll','SetScrollPercent')):raise
+                warning=str(exc)
+                if attempt==0:time.sleep(.2)
+        if data is None:
+            self.query('ResumePresence') # Recheck origin after timeout; do not hide a lost binding.
+            return dict(keyword_text='',read_complete=False,read_warning=warning or '正文采集失败')
+        text=data.get('keyword_text','')
+        result=dict(keyword_text=text,read_source=data.get('source','directed_resume_uia'),read_complete=data.get('read_complete',False))
+        if not recruiting_rules.is_domain(rules) and fast_assessment.evaluate(rules,result,recruiting_rules.positive_hits):
             result['resume_save_note']='关键词直接通道使用UIA正文，未执行可选长图/OCR采集，因此没有简历图片文件。'
             return result
         # Overview text is useful for a direct rule, but does not prove that a
@@ -113,7 +135,7 @@ class WindowsAdapter:
         body=data.get('resume_text',text)
         result['resume_save_note']=('本轮关闭了可选OCR（--no-ocr），未采集简历长图。' if not self.allow_ocr else
                                     '已通过UIA读取正文，本次未执行可选长图/OCR采集。')
-        if len(body.strip())<80 and self.allow_ocr:
+        if (len(body.strip())<80 or not result['read_complete'] and (recruiting_rules.is_domain(rules) or mode=='worker_resume')) and self.allow_ocr:
             folder=self.folder/('resume-'+uuid.uuid4().hex)
             try:
                 captured=capture_resume.capture(self.db,self.run,candidate['candidate_id'],self.hwnd,folder)
@@ -122,11 +144,13 @@ class WindowsAdapter:
                 ocr_text=Path(captured['resume_evidence']['ocr_text']).read_text(encoding='utf-8-sig')
                 result['keyword_text']='\n'.join(part for part in (ocr_text,data.get('overview_text','')) if part)
                 result['read_source']='local_ocr_and_overview_uia'
+                result['read_complete']=True
             except (OSError,ValueError,subprocess.SubprocessError) as exc:
                 import resume_diagnostics
                 result['read_warning']=str(exc)
                 result['resume_save_error']=resume_diagnostics.reason(exc)
                 result.pop('resume_save_note',None)
+        result['readable']=bool(result.get('keyword_text','').strip())
         # Full raw evidence remains local; requests contain facts once per visit.
         return result
 
@@ -160,6 +184,7 @@ class WindowsAdapter:
         return ui_features.favorite(self.db,self.run,candidate['candidate_id'],self.hwnd)
 
     def close(self):
+        self.detail_open=bool(self.query('ResumePresence').get('document_target'))
         if not self.detail_open:return
         found=self.query('Close')
         if found['state']=='found':self.invoke(found['match']['target'])
@@ -169,7 +194,23 @@ class WindowsAdapter:
             self.invoke(document,'Key','Escape')
         self.detail_open=False
 
+    def prefilter(self,candidate):
+        folder=self.folder/('prefilter-'+uuid.uuid4().hex)
+        result=self.ps('capture-card.ps1','-WindowHandle',str(self.hwnd),'-CandidateName',candidate['candidate_name'],'-CardRuntime',candidate['card_runtime'],'-OutputDirectory',str(folder),'-NoImage')
+        return dict(card=result['card'],worker_stage='list',card_evidence=dict(uia_json=str(folder/'card.uia.json')))
+
     def next(self,candidate,mode):
+        if mode=='worker_resume':self.detail_open=bool(self.query('ResumePresence').get('document_target'))
+        if mode=='worker_resume' and self.detail_open:
+            before=self.query('Resume');arrow=self.query('Next')
+            if arrow.get('state')=='found':
+                self.invoke(arrow['match']['target'])
+                for attempt in range(5):
+                    after=self.query('Resume')
+                    if after.get('candidate_id') and after.get('candidate_id')!=before.get('candidate_id'):
+                        return dict(next_candidate=dict(candidate_id=after['candidate_id'],candidate_name=after.get('candidate_name') or '姓名未暴露',hwnd=self.hwnd,already_open=True))
+                    time.sleep(.2)
+            self.close();return dict(returned_to_list=True)
         # Prefer the existing next arrow only for the immediate list successor.
         if mode=='resume' and self.detail_open:
             selection=self.query('Select',processed=self.processed+[candidate['card_runtime']])

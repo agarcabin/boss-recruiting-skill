@@ -34,6 +34,18 @@ def evaluate(rules,payload):
     a=hits(value,config.get('a',[]),'A',config.get('ascii_boundary',False))
     b=hits(value,config.get('b',[]),'B',config.get('ascii_boundary',False))
     both=bool(a and b);mode=config.get('scoring')
+    if mode=='keyword_incremental':
+        # Opt-in keyword-only policy; historical fixed/incremental snapshots keep their behavior.
+        count=len({h['word'].casefold() for h in a+b})
+        base=config['both_base'] if both else config['single_score'] if count else 0
+        score=base+config['extra_points']*max(0,count-(2 if both else 1))
+        import resume_special_rules
+        adjusted=resume_special_rules.score_details(rules,payload,score) if count else dict(
+            score=0,score_before_experience=0,experience_penalty=0,preference_penalty=0)
+        trigger='fulltext_ab' if both else 'single_group' if count else 'none'
+        return dict(eligible=bool(count),**adjusted,requirements={},trigger=trigger,
+                    direct_channels=[trigger] if count else [],hits=a+b,method='direct_rule',
+                    summary=summary(a,b),groups=dict(A=len(a),B=len(b)),keyword_count=count)
     if mode=='incremental':
         score=min(config.get('cap',100),config['both_base']+config['extra_points']*(len(a)+len(b)-2)) if both else config['single_score'] if a or b else 0
         return dict(eligible=both,score=score,score_before_experience=score,

@@ -25,3 +25,6 @@ BOSS仍使用定向Win32 UIA和本地Win32截图。禁止CUA（包括只读绑�
 
 
 查找窗口可用resolve-recruiting-window.ps1；该步骤不再要求随后绑定Codex停止按钮。长截图/OCR仅在有需要时使用，不是所有候选人的强制前置。
+
+
+当前1.4.0补充规则以 [v1.4.0执行口径](v1.4.0-policy.md) 为准。

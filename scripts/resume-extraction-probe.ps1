@@ -8,6 +8,8 @@ $ErrorActionPreference = "Stop"
 
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+. (Join-Path $PSScriptRoot 'boss-browser-binding.ps1')
+
 
 function Get-TokenEstimate([string]$Text) {
     if ([string]::IsNullOrEmpty($Text)) {
@@ -22,7 +24,7 @@ function Get-OutputJson($Value) {
 }
 
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-$root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$WindowHandle)
+$root = (Get-BossBrowserRoot $WindowHandle)
 if ($null -eq $root) {
     throw "无法取得 Codex 窗口 UI Automation 根节点。"
 }
@@ -31,15 +33,12 @@ $documentCondition = New-Object System.Windows.Automation.PropertyCondition(
     [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
     [System.Windows.Automation.ControlType]::Document
 )
-$documents = $root.FindAll(
-    [System.Windows.Automation.TreeScope]::Descendants,
-    $documentCondition
-)
+$documents = (Get-BossDocuments $root)
 
 $resume = $null
 $documentSummary = New-Object System.Collections.Generic.List[object]
 for ($index = 0; $index -lt $documents.Count; $index++) {
-    $document = $documents.Item($index)
+    $document = $documents[$index]
     $valuePattern = $null
     $url = ""
     if ($document.TryGetCurrentPattern(

@@ -369,6 +369,7 @@ def start(db,args):
     if not project_vault.selectable(path):
         output(state='blocked',reason='project_archived_or_locked');return
     rules = recruiting_rules.snapshot(path,fields,getattr(args,'greeting_mode',None))
+    import short_view_wait
     binding = None
     warnings = [fields['_warnings']] if fields.get('_warnings') else []
     if getattr(args,'stop_binding',None):
@@ -380,6 +381,7 @@ def start(db,args):
     db.execute("INSERT INTO runs(run_id,started_at,deadline_at,target,profile_path,profile_hash,min_score,max_views,admission_build_id) VALUES (?,?,?,?,?,?,?,?,?)",(run_id,at,'',target,str(path),profile_hash(path),args.min_score,views,run_admission.BUILD_ID))
     db.execute("UPDATE runs SET candidate_namespace=?,evaluation_mode=?,rule_snapshot=?,stop_binding=? WHERE run_id=?",(rules['namespace'],rules['mode'],json.dumps(rules,ensure_ascii=False),json.dumps(binding) if binding else None,run_id))
     db.execute("INSERT INTO run_control(run_id,state,updated_at) VALUES (?,?,?)",(run_id,'running',at))
+    short_view_wait.set_enabled(db,run_id,getattr(args,'short_view_wait',True))
     report_store.capture(db,run_id,path,fields)
     output(state='started',run_id=run_id,company=fields['company'],position=fields['position'],greeting_mode=rules['greeting_mode'],min_score=args.min_score,target=target,max_views=views,deadline_at=None,warnings=warnings,chat_title=f"{fields['company']} {fields['position']} - {now().astimezone(timezone(timedelta(hours=8))).date().isoformat()}",startup_actions=['set_current_chat_title','collapse_chat_sidebar','confirm_login_prompt_if_present'])
 
@@ -610,6 +612,7 @@ def main() -> None:
     begin.add_argument("--max-views", type=int, help="If omitted, max(300, greeting target)")
     begin.add_argument("--duration-min", type=int, help="Deprecated compatibility argument; ignored")
     begin.add_argument("--min-score", type=int, default=70)
+    begin.add_argument("--short-view-wait",action=argparse.BooleanOptionalAction,default=True)
     begin.add_argument("--greeting-mode", choices=("single", "triple"), help="Override this run's greeting mode; new projects default to single")
     view = commands.add_parser("status")
     view.add_argument("--run")

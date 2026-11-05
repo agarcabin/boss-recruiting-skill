@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
-VERSION='1.3.2'
+VERSION='1.4.1'
 def issuer_path():return project_vault.state_dir()/'publisher'/'issuer.dpapi'
 def issuer():
     if not issuer_path().is_file():raise ValueError('publisher_key_missing_restore_before_build')
@@ -160,6 +160,8 @@ def sanitize_text(text,payload):
 
 def build(root,output,public_root,legacy_dir=None):
     root=Path(root);output=Path(output);public_root=Path(public_root)
+    from skill_update import installed_version
+    version=installed_version(root)
     if public_root.exists() and any(public_root.iterdir()):raise ValueError('public_source_target_must_be_empty')
     record=issuer();payload=collect(root);legacy=materials(legacy_dir)
     if not project_vault.vault_path(root).is_file():
@@ -194,12 +196,14 @@ def build(root,output,public_root,legacy_dir=None):
     (public_root/'references/project-vault.json').write_bytes(crypto.canonical(value))
     defaults=dict(version=7,worker_advantage=[],worker_expectation=[],group_policies={})
     (public_root/'references/recruiting-rules.json').write_bytes(crypto.canonical(defaults))
-    (public_root/'README.md').write_text(PUBLIC_README,encoding='utf-8')
-    (public_root/'SKILL.md').write_text(PUBLIC_SKILL,encoding='utf-8')
-    (public_root/'CHANGELOG.md').write_text('# 版本更新日志\n\n本项目创新招聘组自用，所有项目信息已加密。\n\n## 1.3.2 — 2026-11-04\n\n- 补齐共享项目加密分发。\n- 企业按最早添加时间从新到旧排序，同时间或缺少时间支持人工顺序。\n- 日报新增查看、已核验招呼、总用时、平均速度、目标岗位、载体版本及更新日期表头。\n- 同岗位同日合并统计，保留原表归属、超链接、筛选及冻结表头。\n- 更新完成时登记目标版本，避免旧进程版本阻止新运行。\n\n## 1.3.1 — 2026-11-03\n\n- 通用启动与“菜单1”展示六项主菜单；“菜单2”进入企业选择，第1项继续上次、第2项查看已有项目。\n- 明确企业或岗位且唯一匹配时直接启动，支持简称和指定招呼人数，无需重复确认筛选。\n- 仅给人数时保留数量等待选择岗位；同步公开发布模板与启动回归验证。\n\n## 1.3.0 — 2026-11-03\n\n- 低版本首次升级自动记住本机信任，无需旧包。\n- 首次安装显示加密项目入口，选择后验密；错误不解密、不保存信任。\n\n## 1.2.1 — 2026-11-03\n\n- 唯一岗位日报、历史摘要兼容与安全文本写入。\n- 项目策略更新及归档合并，具体资料随加密数据分发。\n- 首次环境配置、用户本地信任、兼容迁移、发布验签与安装恢复。\n- 清理公开项目资料；历史运行与用户项目保留。\n\n历史项目细节已移出公开日志，本地备份保留。\n',encoding='utf-8')
-    (public_root/'references/evaluation-modes.md').write_text(GENERIC_EVALUATION,encoding='utf-8')
+    (public_root/'README.md').write_text(sanitize_text((root/'README.md').read_text(encoding='utf-8-sig'),payload),encoding='utf-8')
+    (public_root/'SKILL.md').write_text(sanitize_text((root/'SKILL.md').read_text(encoding='utf-8-sig'),payload),encoding='utf-8')
+    (public_root/'CHANGELOG.md').write_text(sanitize_text((root/'CHANGELOG.md').read_text(encoding='utf-8-sig'),payload),encoding='utf-8')
     from public_docs import DOCS
-    for name,text in DOCS.items():(public_root/'references'/name).write_text(text,encoding='utf-8')
+    for name,fallback in {**DOCS,'evaluation-modes.md':GENERIC_EVALUATION,'v1.4.0-policy.md':'','v1.3.3-policy.md':''}.items():
+        path=root/'references'/name
+        content=path.read_text(encoding='utf-8-sig') if path.is_file() else fallback
+        (public_root/'references'/name).write_text(sanitize_text(content,payload),encoding='utf-8')
     for name in ('progress-window.md','project-operations.md'):
         path=root/'references'/name
         if path.exists():(public_root/'references'/name).write_text(sanitize_text(path.read_text(encoding='utf-8-sig'),payload),encoding='utf-8')
@@ -208,15 +212,15 @@ def build(root,output,public_root,legacy_dir=None):
     scan(public_root,payload['redactions'])
     files={p.relative_to(public_root).as_posix():p.read_bytes() for p in public_root.rglob('*') if p.is_file() and p.name!='.gitignore'}
     repository=json.loads((root/'update-source.json').read_text(encoding='utf-8'))['repository']
-    manifest=dict(schema='boss-skill-release/v1',version=VERSION,repository=repository,files={name:hashlib.sha256(data).hexdigest() for name,data in files.items()})
-    output.mkdir(parents=True,exist_ok=True);archive=output/('boss-recruiting-'+VERSION+'.zip')
+    manifest=dict(schema='boss-skill-release/v1',version=version,repository=repository,files={name:hashlib.sha256(data).hexdigest() for name,data in files.items()})
+    output.mkdir(parents=True,exist_ok=True);archive=output/('boss-recruiting-'+version+'.zip')
     with ZipFile(archive,'w',ZIP_DEFLATED) as z:
         for name,data in sorted(files.items()):z.writestr(name,data)
         z.writestr('release-manifest.json',crypto.canonical(manifest))
     archive.with_suffix('.zip.sha256').write_text(hashlib.sha256(archive.read_bytes()).hexdigest()+'  '+archive.name+'\n',encoding='ascii')
     signature=Ed25519PrivateKey.from_private_bytes(crypto.raw(record['signing_key'])).sign(archive.read_bytes())
     archive.with_suffix('.zip.sig').write_bytes(crypto.canonical(dict(algorithm='Ed25519',signature=crypto.b64(signature))))
-    return dict(state='built',version=VERSION,archive=str(archive),public_source=str(public_root),files=len(files),legacy_envelopes=len(value['legacy']))
+    return dict(state='built',version=version,archive=str(archive),public_source=str(public_root),files=len(files),legacy_envelopes=len(value['legacy']))
 
 def scan(root,forbidden):
     findings=[]

@@ -91,6 +91,12 @@ def main():
                     raise ValueError(recorded.get('reason', recorded['state']))
                 token = recorded['token']
         if args.action == 'mouse':
+            import os
+            binding_file=os.environ.get('BOSS_BROWSER_BINDING')
+            if not binding_file:raise ValueError('codex_iab_binding_required')
+            binding=json.loads(Path(binding_file).read_text(encoding='utf-8-sig'))
+            if not target.get('browser_binding_id') or target['browser_binding_id']!=binding.get('binding_id') or target.get('hwnd')!=binding.get('hwnd'):
+                raise ValueError('stale_boss_browser_target_rebind_required')
             values = json.loads(args.mouse_args.read_text(encoding='utf-8-sig'))
             allowed = {'X', 'Y', 'StartX', 'StartY', 'WindowHandle', 'ContentBounds', 'SafeZonesPath'}
             if set(values) - allowed:

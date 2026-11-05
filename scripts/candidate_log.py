@@ -256,7 +256,9 @@ def _render_workbook(db, root: Path, started_at: str, filename: str | None = Non
         coworker_skipped = (coworker.get("action") == "skip" or json.loads(row["eligibility_json"] or "{}").get("trigger")=="coworker_skip") and row["decision"] == "skip"
         coworker_unknown=json.loads(row["eligibility_json"] or "{}").get("trigger")=="coworker_unknown"
         label = "重复跳过" if coworker_skipped else "同事检查待处理" if coworker_unknown else decision_label(row["decision"])
-        overall_score = None if coworker_skipped or coworker_unknown else row["overall_score"]
+        score_incomplete=json.loads(row['eligibility_json'] or '{}').get('trigger')=='score_incomplete'
+        if score_incomplete:label='未完整评分'
+        overall_score = None if coworker_skipped or coworker_unknown or score_incomplete else row["overall_score"]
         hits=json.loads(row['eligibility_json'] or '{}').get('hits',[])
         summary.append([entered_at, row["candidate_name"], overall_score, label, duration,
                         hit_summary.visible(hits,row["pros"],row["electronic_evidence"]), hit_summary.display(row["cons"],hits), json.loads(row["eligibility_json"] or "{}").get("trigger","score"),
@@ -363,8 +365,12 @@ def record(db, args, payload=None):
     if active is None:active=ledger.ensure_candidate(db,args.run,payload['candidate_id'],payload.get('started_at'))
     payload["started_at"]=active['started_at']
     unscored=None
-    if rules.get('mode')!='card':
+    worker_unchecked=(rules.get('mode')=='worker_resume' and payload['decision']!='greet' and not payload.get('coworker_progress'))
+    if worker_unchecked: payload['coworker_progress']={'state':'not_checked','action':'not_applicable','evidence':'关键词未命中或正文不可读，未检查同事记录'}
+    if rules.get('mode')!='card' and not worker_unchecked:
         observation=payload.get('coworker_progress') or candidate_checks.get(db,args.run,payload['candidate_id'])
+        if rules.get('mode')=='worker_resume' and (observation or {}).get('state')=='not_found':
+            observation=dict(observation,state='unavailable',evidence='未找到同事面板，不能确认无记录')
         checked=candidate_checks.record(db,args.run,payload['candidate_id'],observation or {})
         if payload['decision']=='greet' and not checked['may_continue']:
             raise ValueError('coworker_check_before_analysis: '+str(checked.get('reason',checked['action'])))
@@ -372,10 +378,11 @@ def record(db, args, payload=None):
         if not checked['may_continue']:
             payload.update(decision='skip' if checked.get('skip') else 'review',overall_score=0,
                            hard_requirements=False,electronic_resume_enabled=False)
-            payload.pop('electronic',None);payload.pop('resume_evidence',None)
-            unscored=dict(eligible=False,score=0,trigger='coworker_skip' if checked.get('skip') else 'coworker_unknown',hits=[],requirements={})
+            if rules.get('mode')!='worker_resume':
+                payload.pop('electronic',None);payload.pop('resume_evidence',None)
+            unscored=dict(eligible=False,score=0,trigger='coworker_skip' if checked.get('skip') else 'coworker_unknown',hits=recruiting_rules.worker_match(rules,payload)['hits'] if rules.get('mode')=='worker_resume' else [],requirements={})
     if payload.get("overall_score") is not None:payload.setdefault("score_before_experience",payload["overall_score"])
-    result=unscored or fast_assessment.evaluate(rules,payload,recruiting_rules.positive_hits)
+    result=unscored or (None if rules.get('mode')=='worker_resume' else fast_assessment.evaluate(rules,payload,recruiting_rules.positive_hits))
     if result and result.get('method')=='direct_rule':payload=fast_assessment.fill(payload,result)
     if result is None:result=recruiting_rules.evaluate(rules,payload,run['min_score'])
     if rules.get("policy","legacy") != "legacy":
@@ -415,7 +422,7 @@ def record(db, args, payload=None):
             save_failure_note=resume_diagnostics.reason(exc)
             resume_diagnostics.record(db,args.run,payload['candidate_id'],'电子简历归档',exc)
     card_paths=(None,None)
-    if rules.get("mode")=="card":
+    if rules.get("mode")=="card" or payload.get('worker_stage')=='list':
         try: card_paths=archive_card_files(args.output_root,payload["started_at"],payload["candidate_name"],digest,payload)
         except (ValueError,OSError) as exc: warnings.append('卡片归档待补：'+str(exc))
     status = "assessed" if payload["decision"] == "greet" else payload["decision"]

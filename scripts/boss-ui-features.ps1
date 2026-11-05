@@ -7,17 +7,16 @@ $OutputEncoding=[Text.UTF8Encoding]::new($false)
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+. (Join-Path $PSScriptRoot 'boss-browser-binding.ps1')
+
 if(!$WindowHandle){
- $wins=[System.Windows.Automation.AutomationElement]::RootElement.FindAll([System.Windows.Automation.TreeScope]::Children,[System.Windows.Automation.Condition]::TrueCondition)
- $matches=@($wins | Where-Object {
-  try {$_.Current.NativeWindowHandle -and !$_.Current.IsOffscreen -and (Get-Process -Id $_.Current.ProcessId).ProcessName -in @('Codex','ChatGPT')} catch {$false}
- })
- if($matches.Count -ne 1){@{state='unavailable';reason='unique_codex_window_required';count=$matches.Count}|ConvertTo-Json -Compress;exit}
- $WindowHandle=$matches[0].Current.NativeWindowHandle
+ $null=Get-BossBrowserRoot
+ $WindowHandle=[long](Get-Content -LiteralPath $env:BOSS_BROWSER_BINDING -Raw -Encoding UTF8|ConvertFrom-Json).hwnd
 }
-$root=[System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$WindowHandle)
+
+$root=(Get-BossBrowserRoot $WindowHandle)
 $dc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Document)
-$documents=@($root.FindAll([System.Windows.Automation.TreeScope]::Descendants,$dc))
+$documents=@((Get-BossDocuments $root))
 $boss=@();$app=@()
 foreach($doc in $documents){
  $v=$null
@@ -30,7 +29,7 @@ function Make-Target($element,$url){
  $invoke=$null;$cursor=$element
  for($level=0;$cursor -and $level -lt 4;$level++){
   if($cursor.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern,[ref]$invoke)){
-   return @{hwnd=$WindowHandle;runtime_id=$cursor.GetRuntimeId();name=$cursor.Current.Name;class_name=$cursor.Current.ClassName;document_url=$url}
+   return @{browser_binding_id=(Get-BossBindingId);hwnd=$WindowHandle;runtime_id=$cursor.GetRuntimeId();name=$cursor.Current.Name;class_name=$cursor.Current.ClassName;document_url=$url}
   }
   $cursor=[System.Windows.Automation.TreeWalker]::RawViewWalker.GetParent($cursor)
  }
@@ -71,7 +70,7 @@ if($Action -eq 'Favorite'){
     if(!$right -and $node.Current.ClassName -notlike '*like-icon-and-text*' -and $parent.Current.ClassName -notlike '*like-icon-and-text*'){continue}
     $target=Make-Target $node $scope.url
     if(!$target -and $label -in @('已收藏','取消收藏')){
-     $target=@{hwnd=$WindowHandle;runtime_id=$node.GetRuntimeId();name=$label;document_url=$scope.url}
+     $target=@{browser_binding_id=(Get-BossBindingId);hwnd=$WindowHandle;runtime_id=$node.GetRuntimeId();name=$label;document_url=$scope.url}
     }
     if($target -and $seen.Add(($target.runtime_id -join ','))){$hits+=@{state=$(if($label -in @('已收藏','取消收藏')){'saved'}else{'unsaved'});target=$target;label=$label}}
    }

@@ -6,6 +6,7 @@ import hit_summary
 
 
 def evaluate(rules,payload,positive_hits):
+    if rules.get('policy','').startswith('domain_'): return None
     import group_policy
     grouped=group_policy.evaluate(rules,payload)
     if grouped is not None:return grouped

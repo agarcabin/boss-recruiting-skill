@@ -25,8 +25,10 @@ if ([string]::IsNullOrWhiteSpace($Name) -and
 
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+. (Join-Path $PSScriptRoot 'boss-browser-binding.ps1')
 
-$root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$WindowHandle)
+
+$root = (Get-BossBrowserRoot $WindowHandle)
 if ($null -eq $root) {
     throw "无法取得窗口 UI Automation 根节点。"
 }
@@ -38,10 +40,7 @@ if (-not [string]::IsNullOrWhiteSpace($DocumentUrlLike)) {
         [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
         [System.Windows.Automation.ControlType]::Document
     )
-    $documents = $root.FindAll(
-        [System.Windows.Automation.TreeScope]::Descendants,
-        $documentTypeCondition
-    )
+    $documents = (Get-BossDocuments $root)
     $urlMatches = New-Object System.Collections.Generic.List[object]
     foreach ($candidateDocument in $documents) {
         try {

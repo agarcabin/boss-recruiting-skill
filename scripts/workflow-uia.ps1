@@ -1,25 +1,36 @@
 param(
- [ValidateSet('Select','ResumePresence','Resume','Greeting','Next','Close','CoworkerTab')][string]$Action='Select',
+ [ValidateSet('Select','PageJob','ResumePresence','Resume','ResumeFull','Greeting','Next','Close','CoworkerTab')][string]$Action='Select',
  [long]$WindowHandle,[string]$SkipFile,[string]$CardRuntime
 )
 $OutputEncoding=[Text.UTF8Encoding]::new($false);[Console]::OutputEncoding=$OutputEncoding
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName UIAutomationClient;Add-Type -AssemblyName UIAutomationTypes
+. (Join-Path $PSScriptRoot 'boss-browser-binding.ps1')
+
 if(!$WindowHandle){
- $windows=[System.Windows.Automation.AutomationElement]::RootElement.FindAll([System.Windows.Automation.TreeScope]::Children,[System.Windows.Automation.Condition]::TrueCondition)
- $matches=@($windows|Where-Object {try{$_.Current.NativeWindowHandle -and !$_.Current.IsOffscreen -and (Get-Process -Id $_.Current.ProcessId).ProcessName -in @('Codex','ChatGPT')}catch{$false}})
- if($matches.Count -ne 1){throw 'unique_codex_window_required'}
- $WindowHandle=$matches[0].Current.NativeWindowHandle
+ $null=Get-BossBrowserRoot
+ $WindowHandle=[long](Get-Content -LiteralPath $env:BOSS_BROWSER_BINDING -Raw -Encoding UTF8|ConvertFrom-Json).hwnd
 }
-$root=[System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$WindowHandle)
+
+$root=(Get-BossBrowserRoot $WindowHandle)
 $dc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Document)
 $docs=@()
-foreach($d in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants,$dc)){
+foreach($d in (Get-BossDocuments $root)){
  $v=$null
  if(!$d.Current.IsOffscreen -and $d.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern,[ref]$v) -and $v.Current.Value -match '^https://www\.zhipin\.com/web/(chat/recommend|frame/(recommend|c-resume)/)'){$docs+=@{element=$d;url=$v.Current.Value}}
 }
 if(!$docs.Count){throw 'boss_document_unavailable'}
-function Target($node,$url){return @{hwnd=$WindowHandle;runtime_id=$node.GetRuntimeId();name=$node.Current.Name;class_name=$node.Current.ClassName;document_url=$url}}
+function Target($node,$url){return @{browser_binding_id=(Get-BossBindingId);hwnd=$WindowHandle;runtime_id=$node.GetRuntimeId();name=$node.Current.Name;class_name=$node.Current.ClassName;document_url=$url}}
+if($Action -eq 'PageJob'){
+ $labels=[Collections.Generic.HashSet[string]]::new()
+ foreach($class in @('job-select','job-name','position-select','selected-job')){
+  $jc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ClassNameProperty,$class)
+  foreach($node in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants,$jc)){
+   if(!$node.Current.IsOffscreen -and $node.Current.Name){[void]$labels.Add($node.Current.Name)}
+  }
+ }
+ @{state=$(if($labels.Count -eq 1){'read'}else{'unknown'});display_name=$(if($labels.Count -eq 1){@($labels)[0]}else{$null});source='directed_job_selector_uia'}|ConvertTo-Json -Compress;exit
+}
 function Invoker($node){
  $p=$null
  if($node.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern,[ref]$p)){return $node}
@@ -79,7 +90,7 @@ if($Action -eq 'ResumePresence'){
  }
  @{state=$(if($resumeDocs.Count){'present'}else{'absent'});hwnd=$WindowHandle;view_signature=(@($signal) -join ';');document_target=$(if($resumeDocs.Count){Target $resumeDocs[0].element $resumeDocs[0].url}else{$null})}|ConvertTo-Json -Depth 6 -Compress;exit
 }
-if($Action -eq 'Resume'){
+if($Action -in @('Resume','ResumeFull')){
  $parts=@();$seen=[Collections.Generic.HashSet[string]]::new()
  foreach($doc in $docs|Where-Object {$_.url -like '*c-resume*'}){
   $tc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Text)
@@ -88,6 +99,54 @@ if($Action -eq 'Resume'){
   }
  }
  $resumeText=$parts -join "`n"
+ $complete=$false
+ # TextPattern exposes the entire readable document, including below the fold.
+ foreach($doc in $docs|Where-Object {$_.url -like '*c-resume*'}){
+  $tp=$null
+  if($doc.element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern,[ref]$tp)){
+   $full=$tp.DocumentRange.GetText(-1)
+   if($full){$resumeText=$full;$complete=$true}
+  }
+ }
+ if($Action -eq 'ResumeFull' -and !$complete){
+  $collected=[Collections.Generic.HashSet[string]]::new()
+  foreach($part in $parts){[void]$collected.Add($part)}
+  foreach($doc in $docs|Where-Object {$_.url -like '*c-resume*'}){
+   $nodes=@($doc.element)+@($doc.element.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::IsScrollPatternAvailableProperty,$true)))
+   $ancestor=[System.Windows.Automation.TreeWalker]::RawViewWalker.GetParent($doc.element)
+   for($level=0;$ancestor -and $level -lt 12;$level++){
+    try{Assert-BossBrowserTarget $ancestor $WindowHandle}catch{break}
+    $nodes+=,$ancestor
+    $ancestor=[System.Windows.Automation.TreeWalker]::RawViewWalker.GetParent($ancestor)
+   }
+   $scrollers=@($nodes|Where-Object {$sp=$null;!$_.Current.IsOffscreen -and $_.TryGetCurrentPattern([System.Windows.Automation.ScrollPattern]::Pattern,[ref]$sp) -and $sp.Current.VerticallyScrollable})
+   $preferred=@($scrollers|Where-Object {$_.Current.ClassName -eq 'resume-detail-wrap' -or $_.Current.AutomationId -eq 'resume'})
+   if($preferred.Count -eq 1){$scrollers=$preferred}
+   if($scrollers.Count -gt 1){throw 'resume_scroll_scope_ambiguous'}
+   if(!$scrollers.Count){
+    $tc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Text)
+    $allText=@($doc.element.FindAll([System.Windows.Automation.TreeScope]::Descendants,$tc))
+    if($allText.Count -and !@($allText|Where-Object {$_.Current.IsOffscreen -and $_.Current.Name}).Count){$complete=$true}
+    continue
+   }
+   $scroller=$scrollers[0];$sp=$null;[void]$scroller.TryGetCurrentPattern([System.Windows.Automation.ScrollPattern]::Pattern,[ref]$sp)
+   $original=$sp.Current.VerticalScrollPercent
+   try{
+    Assert-BossBrowserTarget $scroller $WindowHandle
+    $sp.SetScrollPercent(-1,0)
+    for($page=0;$page -lt 40;$page++){
+     Start-Sleep -Milliseconds 100
+     Assert-BossBrowserTarget $scroller $WindowHandle
+     $tc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Text)
+     foreach($node in $doc.element.FindAll([System.Windows.Automation.TreeScope]::Descendants,$tc)){if(!$node.Current.IsOffscreen -and $node.Current.Name){[void]$collected.Add($node.Current.Name)}}
+     if($sp.Current.VerticalScrollPercent -ge 99.9){$complete=$true;break}
+     Assert-BossBrowserTarget $scroller $WindowHandle
+     $sp.Scroll([System.Windows.Automation.ScrollAmount]::NoAmount,[System.Windows.Automation.ScrollAmount]::LargeIncrement)
+    }
+   }finally{Assert-BossBrowserTarget $scroller $WindowHandle;$sp.SetScrollPercent(-1,$original)}
+  }
+  if($collected.Count){$resumeText=@($collected) -join "`n"}
+ }
  $parts=@()
  # The user-visible right-hand employment overview can be sufficient for a direct
  # employer/role match. Read that bounded panel before considering a long OCR.
@@ -111,8 +170,21 @@ if($Action -eq 'Resume'){
   }
  }
  $resumeDocs=@($docs|Where-Object {$_.url -like '*c-resume*'})
+ $detailName='';$identity=''
+ foreach($rd in $resumeDocs){
+  $nc=[System.Windows.Automation.OrCondition]::new(
+   [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ClassNameProperty,'geek-name'),
+   [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ClassNameProperty,'name'))
+  $nameNode=@($rd.element.FindAll([System.Windows.Automation.TreeScope]::Descendants,$nc)|Where-Object {!$_.Current.IsOffscreen -and $_.Current.Name}|Select-Object -First 1)
+  if($nameNode.Count){$detailName=$nameNode[0].Current.Name}
+  if($rd.url -match '(?:encryptId|encryptGeekId|geekId|resumeId)=([^&]+)'){$identity='resume:'+$Matches[1]}
+ }
+ if(!$identity -and $resumeText.Length -ge 80){
+  $sha=[Security.Cryptography.SHA256]::Create()
+  try{$identity='resume:'+([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($detailName+"`n"+$resumeText)))).Replace('-','')}finally{$sha.Dispose()}
+ }
  $overviewText=$parts -join "`n"
- @{state='read';keyword_text=(@($resumeText,$overviewText)|Where-Object {$_}) -join "`n";resume_text=$resumeText;overview_text=$overviewText;source='directed_resume_and_overview_uia';hwnd=$WindowHandle;document_target=$(if($resumeDocs.Count){Target $resumeDocs[0].element $resumeDocs[0].url}else{$null})}|ConvertTo-Json -Depth 6 -Compress;exit
+ @{state='read';read_complete=$complete;candidate_id=$identity;candidate_name=$detailName;keyword_text=(@($resumeText,$overviewText)|Where-Object {$_}) -join "`n";resume_text=$resumeText;overview_text=$overviewText;source='directed_resume_and_overview_uia';hwnd=$WindowHandle;document_target=$(if($resumeDocs.Count){Target $resumeDocs[0].element $resumeDocs[0].url}else{$null})}|ConvertTo-Json -Depth 6 -Compress;exit
 }
 $hits=@();$seen=[Collections.Generic.HashSet[string]]::new()
 foreach($doc in $docs){

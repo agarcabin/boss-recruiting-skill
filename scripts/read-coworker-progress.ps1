@@ -10,6 +10,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+. (Join-Path $PSScriptRoot 'boss-browser-binding.ps1')
+
 
 function Emit-Observation([string]$State, [string]$Timestamp, [string]$Evidence, [object[]]$Entries=@(), [bool]$Complete=$false) {
     [pscustomobject]@{
@@ -23,11 +25,11 @@ function Emit-Observation([string]$State, [string]$Timestamp, [string]$Evidence,
 }
 
 try {
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$WindowHandle)
+    $root = (Get-BossBrowserRoot $WindowHandle)
     $documentCondition = New-Object System.Windows.Automation.PropertyCondition(
         [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
         [System.Windows.Automation.ControlType]::Document)
-    $documents = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $documentCondition)
+    $documents = (Get-BossDocuments $root)
     $matchingDocuments = @()
     foreach ($document in $documents) {
         $value = $null
