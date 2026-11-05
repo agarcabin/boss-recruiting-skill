@@ -40,6 +40,26 @@ class GroupTests(unittest.TestCase):
         self.assertTrue(group_policy.evaluate(rules,dict(keyword_text='alpha 4年'))['eligible'])
         self.assertFalse(group_policy.evaluate(rules,dict(keyword_text='alpha 14年'))['eligible'])
 
+class KeywordIncrementalTests(unittest.TestCase):
+    def rules(self):
+        return dict(version=7,policy='resume_special',fulltext_groups=dict(a=['alpha','beta','gamma'],b=['one','two'],scoring='keyword_incremental',single_score=60,both_base=70,extra_points=2,ascii_boundary=True),resume_special_experience_penalties=[dict(below_years=2,deduct=10)],resume_special_preference_penalty=True,preference_salary_threshold=50000,preference_deduction=10)
+    def test_single_both_and_repeated_terms(self):
+        import recruiting_rules
+        for text,score,allowed in [('',0,False),('alpha',60,True),('one',60,True),('alpha beta',62,True),('alpha one',70,True),('alpha beta one',72,True),('alpha beta one two',74,True),('ALPHA alpha one ONE',70,True)]:
+            with self.subTest(text=text):
+                result=recruiting_rules.evaluate(self.rules(),dict(keyword_text=text,overall_score=100,hard_requirements=True),99)
+                self.assertEqual((result['score'],result['eligible']),(score,allowed))
+    def test_penalties_and_recalculation(self):
+        import recruiting_rules,fast_assessment
+        rules=self.rules();payload=dict(keyword_text='alpha one',related_experience_years=1,expected_salary=60000)
+        result=recruiting_rules.evaluate(rules,payload,99)
+        self.assertEqual((result['score'],result['experience_penalty'],result['preference_penalty'],result['eligible']),(50,10,10,True))
+        self.assertEqual(recruiting_rules.evaluate(rules,fast_assessment.fill(payload,result),99)['score'],50)
+    def test_no_hits_never_fall_back_to_manual_score(self):
+        import recruiting_rules
+        result=recruiting_rules.evaluate(self.rules(),dict(keyword_text='unrelated',overall_score=100,hard_requirements=True),70)
+        self.assertEqual((result['score'],result['eligible']),(0,False))
+
 class SummaryTests(unittest.TestCase):
     def test_legacy_and_malformed(self):
         self.assertEqual(hit_summary.visible([], ' 直接规则命中: [{"company":"SampleVendor","quote":"context"}]'),'命中词：SampleVendor')

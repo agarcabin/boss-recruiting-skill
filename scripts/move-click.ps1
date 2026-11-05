@@ -100,6 +100,8 @@ try {
     Add-Type -AssemblyName WindowsBase
     Add-Type -AssemblyName UIAutomationClient
     Add-Type -AssemblyName UIAutomationTypes
+. (Join-Path $PSScriptRoot 'boss-browser-binding.ps1')
+
 }
 catch {
     $uiaAvailable = $false
@@ -127,6 +129,7 @@ if (-not $DryRun -and $WindowHandle -ne [IntPtr]::Zero) {
 
     if ([NativeMouseTrajectory]::GetForegroundWindow() -ne $WindowHandle) {
         if (-not [NativeMouseTrajectory]::IsZoomed($WindowHandle)) {
+            $null=Get-BossBrowserRoot ([long]$WindowHandle)
             [void][NativeMouseTrajectory]::ShowWindow($WindowHandle, 3)
             throw "目标窗口原本未最大化，已切换为最大化；请重新获取页面坐标和内容边界后再执行。未发送鼠标输入。"
         }
@@ -155,6 +158,7 @@ if (-not $DryRun -and $WindowHandle -ne [IntPtr]::Zero) {
 
         try {
             [void][NativeMouseTrajectory]::BringWindowToTop($WindowHandle)
+            $null=Get-BossBrowserRoot ([long]$WindowHandle)
             [void][NativeMouseTrajectory]::SetForegroundWindow($WindowHandle)
             [void][NativeMouseTrajectory]::SetFocus($WindowHandle)
         }
@@ -334,7 +338,7 @@ function Find-ForbiddenTarget {
     }
 
     try {
-        $root = [System.Windows.Automation.AutomationElement]::FromHandle($WindowHandle)
+        $root = (Get-BossBrowserRoot ([long]$WindowHandle))
         foreach ($forbiddenName in @($ForbiddenNames)) {
             if ([string]::IsNullOrWhiteSpace($forbiddenName)) {
                 continue
@@ -688,8 +692,12 @@ function Invoke-RealClick() {
     }
     $downFlag = if ($Button -eq "Right") { 0x0008 } else { 0x0002 }
     $upFlag = if ($Button -eq "Right") { 0x0010 } else { 0x0004 }
+    $null=Get-BossBrowserRoot ([long]$WindowHandle)
+    Assert-BossPointer
     [NativeMouseTrajectory]::mouse_event($downFlag, 0, 0, 0, [UIntPtr]::Zero)
     [System.Threading.Thread]::Sleep($random.Next(35, 86))
+    $null=Get-BossBrowserRoot ([long]$WindowHandle)
+    Assert-BossPointer
     [NativeMouseTrajectory]::mouse_event($upFlag, 0, 0, 0, [UIntPtr]::Zero)
 }
 

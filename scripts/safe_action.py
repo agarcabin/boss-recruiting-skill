@@ -36,7 +36,8 @@ def business_check(db, run_id, candidate_id):
     if not assessment or assessment['decision'] != 'greet' or not ledger.assessment_eligible(run, assessment):
         raise ValueError('assessment_not_eligible')
     if assessment['evaluation_mode'] != 'card':
-        result = coworker_progress.evaluate(json.loads(assessment['coworker_progress'] or '{}'), ledger.now())
+        import candidate_checks
+        result = candidate_checks.evaluate_resume(db,run_id,candidate_id,json.loads(assessment['coworker_progress'] or '{}'))
         if not result['may_continue']:
             raise ValueError(result['reason'])
     count = db.execute("SELECT COUNT(*) FROM candidates WHERE run_id=? AND status='sent'", (run_id,)).fetchone()[0]
@@ -91,6 +92,12 @@ def main():
                     raise ValueError(recorded.get('reason', recorded['state']))
                 token = recorded['token']
         if args.action == 'mouse':
+            import os
+            binding_file=os.environ.get('BOSS_BROWSER_BINDING')
+            if not binding_file:raise ValueError('codex_iab_binding_required')
+            binding=json.loads(Path(binding_file).read_text(encoding='utf-8-sig'))
+            if not target.get('browser_binding_id') or target['browser_binding_id']!=binding.get('binding_id') or target.get('hwnd')!=binding.get('hwnd'):
+                raise ValueError('stale_boss_browser_target_rebind_required')
             values = json.loads(args.mouse_args.read_text(encoding='utf-8-sig'))
             allowed = {'X', 'Y', 'StartX', 'StartY', 'WindowHandle', 'ContentBounds', 'SafeZonesPath'}
             if set(values) - allowed:

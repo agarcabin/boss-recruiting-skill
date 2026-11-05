@@ -5,6 +5,8 @@ $OutputEncoding = [Text.UTF8Encoding]::new($false)
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+. (Join-Path $PSScriptRoot 'boss-browser-binding.ps1')
+
 Add-Type -AssemblyName System.Drawing
 Add-Type @'
 using System; using System.Runtime.InteropServices;
@@ -12,11 +14,11 @@ public class CardNative { [DllImport("user32.dll")] public static extern IntPtr 
 '@
 [void][CardNative]::SetProcessDPIAware()
 if(!$NoImage -and [CardNative]::GetForegroundWindow().ToInt64() -ne $WindowHandle){throw 'boss_window_not_foreground'}
-$root=[System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$WindowHandle)
+$root=(Get-BossBrowserRoot $WindowHandle)
 $docCondition=[System.Windows.Automation.AndCondition]::new(
  [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Document),
  [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,'BOSS直聘'))
-$docs=$root.FindAll([System.Windows.Automation.TreeScope]::Descendants,$docCondition)
+$docs=(Get-BossDocuments $root)
 $document=$null;$url=$null
 foreach($doc in $docs){$pattern=$null;if($doc.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern,[ref]$pattern)){$value=$pattern.Current.Value;if($value -like 'https://www.zhipin.com/web/chat/recommend*'){$document=$doc;$url=$value;break}}}
 if(!$document){throw 'recommend_document_not_found'}
@@ -36,10 +38,11 @@ if(!$NoImage){
 }
 $walker=[System.Windows.Automation.TreeWalker]::RawViewWalker
 $queue=[Collections.Generic.Queue[object]]::new();$queue.Enqueue(@{element=$card;depth=0})
-$nodes=0;$contactEvidence=@();$lookupComplete=$true;$opaqueIcons=0
+$nodes=0;$contactEvidence=@();$lookupComplete=$true;$opaqueIcons=0;$readableNames=@()
 while($queue.Count -gt 0 -and $nodes -lt 300){
  $item=$queue.Dequeue();$node=$item.element;$nodes++
  $n=$node.Current.Name;$c=$node.Current.ClassName
+ if($n -and !$node.Current.IsOffscreen){$readableNames+=$n}
  if(!$n -and ($c -match '(?i)icon|colleague|coworker' -or $node.Current.ControlType -eq [System.Windows.Automation.ControlType]::Image) -and $c -notmatch '(?i)avatar|photo|head'){$opaqueIcons++}
  if($n -match '已有同事.*(沟通|招呼)|同事已.*(沟通|招呼)|同事沟通过|同事打过招呼' -or $c -match '(?i)(coworker|colleague).*(contact|greet)|(?:contact|greet).*(coworker|colleague)' -or (($c -split '\s+') -contains 'tooltip-wrap' -and ($c -split '\s+') -contains 'chat-history')){$contactEvidence+=@{name=$n;class_name=$c}}
  if($item.depth -ge 8){if($walker.GetFirstChild($node)){$lookupComplete=$false};continue}
@@ -50,14 +53,18 @@ if($queue.Count){$lookupComplete=$false}
 $contactState=if($contactEvidence.Count){'present'}elseif($lookupComplete -and !$opaqueIcons){'absent'}else{'unknown'}
 $coworker=@{state=$contactState;lookup_completed=$lookupComplete;evidence="当前卡片UIA子树检查$nodes 个节点";icons=$contactEvidence;opaque_icons=$opaqueIcons;visual_review_required=($contactState -eq 'unknown')}
 $text=$card.Current.Name
+$readableText=$text
+foreach($part in $readableNames){if(!$readableText.Contains($part)){$readableText+="`n"+$part}}
 $advantage='';$expectation=''
 if($contactState -eq 'absent' -and $text -match '(?s)优势[：:\s]*(.*?)(?=期望[：:\s]|$)'){$advantage=$Matches[1].Trim()}
 if($contactState -eq 'absent' -and $text -match '(?s)期望[：:\s]*(.*?)(?=优势[：:\s]|打招呼|继续沟通|$)'){$expectation=$Matches[1].Trim()}
-$fields=@{coworker_contact=$coworker;advantage=$advantage;expectation=$expectation;already_contacted= [bool]($text -match '已沟通|已打招呼|继续沟通')}
+$fields=@{readable_text=$readableText;coworker_contact=$coworker;advantage=$advantage;expectation=$expectation;already_contacted= [bool]($text -match '已沟通|已打招呼|继续沟通')}
 $observation=@{name=$CandidateName;card=$fields;raw_text=$text;observed_at=[DateTimeOffset]::Now.ToString('o');document_url=$url;window_handle=$WindowHandle;runtime_id=$card.GetRuntimeId();bounds=@{x=$rect.X;y=$rect.Y;width=$rect.Width;height=$rect.Height}}
 $directory=[IO.Path]::GetFullPath($OutputDirectory);[IO.Directory]::CreateDirectory($directory)|Out-Null
 if(!$NoImage){
  $bitmap=[Drawing.Bitmap]::new([int]$rect.Width,[int]$rect.Height);$graphics=[Drawing.Graphics]::FromImage($bitmap)
+ $null=Get-BossBrowserRoot ([long]$WindowHandle)
+ Assert-BossForeground
  try {$graphics.CopyFromScreen([int]$rect.X,[int]$rect.Y,0,0,$bitmap.Size);$bitmap.Save((Join-Path $directory 'card.png'),[Drawing.Imaging.ImageFormat]::Png)}finally{$graphics.Dispose();$bitmap.Dispose()}
 }
 $observation.image_saved=!$NoImage

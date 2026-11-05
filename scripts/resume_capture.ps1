@@ -18,6 +18,8 @@ Set-StrictMode -Version Latest
 
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+. (Join-Path $PSScriptRoot 'boss-browser-binding.ps1')
+
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type @"
@@ -66,7 +68,7 @@ function Invoke-CaptureGuard([scriptblock]$Action) {
 
 $script:CaptureResumeDocument = $null
 function Find-ResumeDocument {
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$WindowHandle)
+    $root = (Get-BossBrowserRoot $WindowHandle)
     if ($null -eq $root) {
         return $null
     }
@@ -74,13 +76,10 @@ function Find-ResumeDocument {
         [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
         [System.Windows.Automation.ControlType]::Document
     )
-    $documents = $root.FindAll(
-        [System.Windows.Automation.TreeScope]::Descendants,
-        $documentCondition
-    )
+    $documents = (Get-BossDocuments $root)
     $visibleResumes = New-Object System.Collections.Generic.List[object]
     for ($index = 0; $index -lt $documents.Count; $index++) {
-        $document = $documents.Item($index)
+        $document = $documents[$index]
         $valuePattern = $null
         if (
             $document.TryGetCurrentPattern(
@@ -227,6 +226,7 @@ function Set-ResumeScrollPercent([double]$Percent) {
         throw $context.reason
     }
     Invoke-CaptureGuard {
+        Assert-BossBrowserTarget $context.element $WindowHandle
         $context.pattern.SetScrollPercent([System.Windows.Automation.ScrollPattern]::NoScroll,$Percent)
     }
     Start-Sleep -Milliseconds 650
@@ -266,6 +266,8 @@ function Save-Screenshot([string]$Path, $Geometry) {
     $bitmap = New-Object System.Drawing.Bitmap($Geometry.width, $Geometry.height)
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
     try {
+        $null=Get-BossBrowserRoot ([long]$WindowHandle)
+        Assert-BossForeground
         $graphics.CopyFromScreen(
             $Geometry.left,
             $Geometry.top,

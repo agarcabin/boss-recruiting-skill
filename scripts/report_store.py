@@ -194,8 +194,8 @@ def add_summary_header(ws, db, profile, stamp, rows, at=None):
     speed = (f"{seconds/metrics['viewed']:.2f} 秒/人"
              if seconds is not None and metrics['viewed'] else '暂无')
     version = skill_update.installed_version(Path(__file__).resolve().parents[1])
-    ws.insert_rows(1, 5)
-    for cells in ws.iter_rows(min_row=6):
+    ws.insert_rows(1, 1)
+    for cells in ws.iter_rows(min_row=2):
         for cell in cells:
             if cell.hyperlink:
                 cell.hyperlink.ref = cell.coordinate
@@ -203,15 +203,13 @@ def add_summary_header(ws, db, profile, stamp, rows, at=None):
              f"共查看 {metrics['viewed']} 人，打招呼了 {metrics['sent']} 人",
              f'总用时 {duration}，平均速度 {speed}',
              f"载体版本：v{version}，更新日期：{current.astimezone(ZONE):%Y-%m-%d %H:%M:%S}"]
-    for number, text in enumerate(texts, 1):
-        ws.merge_cells(start_row=number, start_column=1, end_row=number, end_column=ws.max_column)
-        cell = ws.cell(number, 1, text)
-        cell.alignment = Alignment(vertical='center', wrap_text=True)
-        cell.font = Font(name='微软雅黑', size=14 if number==1 else 11,
-                         bold=number in (1,2), color='FFFFFF' if number==1 else '20364D')
-        cell.fill = PatternFill('solid', fgColor='26496A' if number==1 else 'EDF3F8')
-        ws.row_dimensions[number].height = 32 if number==1 else 28
-    ws.freeze_panes = 'C7'
-    ws.auto_filter.ref = f'A6:{ws.cell(ws.max_row, ws.max_column).coordinate}'
-    ws.print_title_rows = '1:6'
+    ws.merge_cells(start_row=1,start_column=1,end_row=1,end_column=ws.max_column)
+    cell=ws.cell(1,1,' ｜ '.join(texts))
+    cell.alignment=Alignment(vertical='center',wrap_text=False,shrink_to_fit=True)
+    cell.font=Font(name='微软雅黑',size=11,bold=True,color='FFFFFF')
+    cell.fill=PatternFill('solid',fgColor='26496A')
+    ws.row_dimensions[1].height=24
+    ws.freeze_panes='C3'
+    ws.auto_filter.ref=f'A2:{ws.cell(ws.max_row,ws.max_column).coordinate}'
+    ws.print_title_rows='1:2'
     return metrics

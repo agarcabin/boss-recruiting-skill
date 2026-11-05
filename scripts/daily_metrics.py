@@ -46,7 +46,7 @@ def workbook_counts(path):
     try:
         ws=wb['候选人简报']; viewed=sent=0
         import re
-        headline=re.fullmatch(r'共查看 (\d+) 人，打招呼了 (\d+) 人',str(ws['A2'].value or ''))
+        headline=re.search(r'共查看 (\d+) 人，打招呼了 (\d+) 人',str(ws['A1'].value or '')) or re.fullmatch(r'共查看 (\d+) 人，打招呼了 (\d+) 人',str(ws['A2'].value or ''))
         if headline:
             return dict(viewed=int(headline[1]),sent=int(headline[2]))
         for row in ws.iter_rows(min_row=2):

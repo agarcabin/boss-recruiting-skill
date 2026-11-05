@@ -65,6 +65,34 @@ def evaluate(observation: dict | None, at: datetime | None = None) -> dict:
     return dict(result,action='continue',may_continue=True,reason='all_coworker_contacts_older_than_7_days')
 
 
+def evaluate_for_rules(observation, rules, at=None):
+    """Worker v2 permits attempted but unreadable checks, never a known recent contact."""
+    import recruiting_rules
+    result = evaluate(observation, at)
+    if not recruiting_rules.worker_v2(rules):
+        return result
+    if not isinstance(observation, dict) or not observation or observation.get('state') in (None, 'not_checked'):
+        return result
+    at = at or datetime.now(timezone.utc)
+    records = observation.get('records')
+    records = list(records) if isinstance(records, list) else []
+    if observation.get('first_greeting_at'):
+        records.append(observation['first_greeting_at'])
+    for record in records:
+        value = record.get('greeting_at') if isinstance(record, dict) else record
+        try:
+            stamp = parse_greeting_time(str(value or ''))
+        except (ValueError, TypeError):
+            continue
+        if at - timedelta(days=7) <= stamp <= at:
+            return dict(result, action='skip', skip=True, may_continue=False,
+                        matched_greeting_at=stamp.isoformat(), reason='coworker_within_or_exactly_7_days')
+    if result['may_continue']:
+        return result
+    return dict(result, action='continue', skip=False, may_continue=True,
+                unreadable_reason=result['reason'], reason='worker_unreadable_coworker_allowed_by_user')
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True, type=Path, help="Small directed UIA observation JSON")

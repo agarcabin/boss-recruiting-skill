@@ -53,7 +53,7 @@ def parse(prompt,projects,at=None):
     return dict(state='ready_to_start',startup_mode='direct',profile=project['profile'],company=project['company'],position=project['position'],
                 target=target,max_views=max_views,chat_title=f"{project['company']} {project['position']} - {at.astimezone(timezone(timedelta(hours=8))).date().isoformat()}",
                 approval_warning=project.get('approval')!='approved',views_explicit=bool(viewing),greetings_explicit=bool(greeting),
-                next_actions=['set_current_chat_title','collapse_chat_sidebar','open_boss','confirm_already_logged_in_prompt_if_present','start_direct_run'])
+                next_actions=['set_current_chat_title','collapse_chat_sidebar','open_boss_in_codex','confirm_already_logged_in_prompt_if_present','start_direct_run'])
 
 
 def main():
@@ -64,6 +64,7 @@ def main():
     p.add_argument('--confirm-filters',action='store_true',help='Use only after the user checked filters and replied 1')
     p.add_argument('--start-direct',action='store_true',help='Start a prepared explicit-job request without manual filter confirmation')
     p.add_argument('--min-score',type=int)
+    p.add_argument('--short-view-wait',action=argparse.BooleanOptionalAction,default=None)
     args=p.parse_args()
     if args.plan:plan=startup_plan.load(args.plan)
     elif args.confirm_filters or args.start_direct or args.complete_action:
@@ -74,6 +75,8 @@ def main():
         plan=parse(args.prompt,project_registry.list_projects())
         if plan['state']=='menu':
             plan.update(project_registry.build_home_menu(project_registry.list_projects(),project_registry.latest_run_readonly(args.db),locked_entry=project_registry.encrypted_entry()))
+        plan['browser_target']='codex_iab'
+        plan['short_view_wait']=True if args.short_view_wait is None else args.short_view_wait
         plan['min_score']=70 if args.min_score is None else args.min_score
         if plan['state'] in ('await_filters','ready_to_start'):plan=startup_plan.save(plan,args.prompt,args.state_dir)
     if args.complete_action:startup_plan.complete(plan,args.complete_action)
@@ -86,7 +89,7 @@ def main():
                 if not plan.get('run'):
                     out=io.StringIO()
                     with contextlib.redirect_stdout(out):
-                        ledger.start(db,argparse.Namespace(profile=plan['profile'],target=plan['target'],max_views=plan['max_views'],min_score=plan.get('min_score',70) if args.min_score is None else args.min_score))
+                        ledger.start(db,argparse.Namespace(profile=plan['profile'],target=plan['target'],max_views=plan['max_views'],short_view_wait=plan.get('short_view_wait',True) if args.short_view_wait is None else args.short_view_wait,min_score=plan.get('min_score',70) if args.min_score is None else args.min_score))
                     created=json.loads(out.getvalue())
                     if created['state']!='started':
                         print(json.dumps(created,ensure_ascii=False));return

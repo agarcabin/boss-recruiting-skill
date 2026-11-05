@@ -19,9 +19,10 @@ def snapshot(profile: Path, fields: dict, greeting_mode: str | None = None) -> d
     greeting_mode = greeting_mode if greeting_mode is not None else fields.get('greeting_mode', metadata.get('greeting_mode', 'single'))
     if greeting_mode not in ('single', 'triple'):
         raise ValueError('invalid_greeting_mode')
-    if mode not in ('card', 'resume') or policy not in ('legacy','worker','resume_special','domain_advanced','domain_basic','domain_unified'):
+    if policy == 'worker' and mode == 'card': mode = 'worker_resume'
+    if mode not in ('card', 'resume', 'worker_resume') or policy not in ('legacy','worker','resume_special','domain_advanced','domain_basic','domain_unified'):
         raise ValueError('invalid_evaluation_policy')
-    if (policy == 'worker') != (mode == 'card'):
+    if (policy == 'worker') != (mode in ('card','worker_resume')):
         raise ValueError('mode_policy_mismatch')
     import project_vault
     rules = project_vault.rule_config(CONFIG)
@@ -30,8 +31,13 @@ def snapshot(profile: Path, fields: dict, greeting_mode: str | None = None) -> d
     if policy in group_policies and 'fulltext_groups' not in metadata.get('rules',{}):rules['fulltext_groups']=group_policies[policy]
     rules.update(policy=policy, mode=mode, greeting_mode=greeting_mode,
                  namespace=fields.get('candidate_namespace') or metadata.get('candidate_namespace') or f"{fields['company']}-{fields['position']}",
-                 pdf_required=fields.get('pdf_required', 'true').lower() != 'false')
+                 pdf_required=fields.get('pdf_required', 'true').lower() != 'false',
+                 browser_target='codex_iab', short_view_wait=True)
+    if policy == 'worker':
+        rules['worker_policy_version'] = 2
+        rules['worker_keywords'] = list(dict.fromkeys(rules.get('worker_keywords', rules.get('worker_advantage', []) + rules.get('worker_expectation', []))))
     return rules
+
 
 def positive_hits(text: str, words: list[str]) -> list[dict]:
     hits = []
@@ -59,6 +65,14 @@ def evaluate(rules: dict, payload: dict, min_score: int) -> dict:
     import project_vault
     rules=project_vault.normalize(rules)
     payload=project_vault.normalize(payload)
+    if is_domain(rules) and payload.get('read_complete') is False:
+        return dict(eligible=False,score=0,trigger='score_incomplete',hits=[],requirements={},scoring_complete=False)
+    if rules.get('mode')=='worker_resume':
+        if worker_v2(rules) and (payload.get('worker_stage') != 'resume' or payload.get('read_complete') is not True):
+            return dict(eligible=False, score=0, trigger='resume_evidence_required', hits=[], requirements={})
+        return worker_match(rules,payload)
+    grouped=domain_group_score(rules,payload,min_score) if is_domain(rules) else None
+    if grouped is not None: return grouped
     direct=fast_assessment.evaluate(rules,payload,positive_hits)
     if direct:return direct
     policy = rules.get('policy','legacy')
@@ -151,3 +165,53 @@ def run_greeting_mode(run) -> str:
 
 def from_assessment(row) -> dict:
     return json.loads(row['eligibility_json'] or '{}') if 'eligibility_json' in row.keys() else {}
+
+
+def worker_v2(rules):
+    return rules.get('mode') == 'worker_resume' and rules.get('worker_policy_version') == 2
+
+
+def worker_match(rules, payload):
+    if worker_v2(rules):
+        stage = payload.get('worker_stage', 'resume')
+        if stage != 'list' and payload.get('read_complete') is False:
+            return dict(eligible=False, score=0, trigger='score_incomplete', hits=[], requirements={})
+        card = payload.get('card', {})
+        text = (payload.get('raw_text') or card.get('readable_text') or '\n'.join(str(card.get(k, '')) for k in ('advantage', 'expectation'))) if stage == 'list' else payload.get('keyword_text', '')
+        words = list(dict.fromkeys(rules.get('worker_keywords', rules.get('worker_advantage', []) + rules.get('worker_expectation', []))))
+        hits = positive_hits(text, words)
+        found = list({h['word']: dict(h, field='card' if stage == 'list' else 'resume') for h in hits}.values())
+        return dict(eligible=bool(found), score=min(100, 60 + 2 * (len(found) - 1)) if found else 0,
+                    trigger='keyword' if found else 'none', hits=found, requirements={})
+    stage=payload.get('worker_stage','resume')
+    card=payload.get('card',{})
+    text=payload.get('keyword_text','')
+    a=positive_hits(card.get('advantage','') if stage=='list' else text,rules.get('worker_advantage',[]))
+    b=positive_hits(card.get('expectation','') if stage=='list' else text,rules.get('worker_expectation',[]))
+    found=[dict(h,field='advantage') for h in a]+[dict(h,field='expectation') for h in b]
+    return dict(eligible=bool(found) and not card.get('already_contacted',False),score=(60 if a else 0)+(40 if b else 0),trigger='keyword' if found else 'none',hits=found,requirements={})
+
+def is_domain(rules):
+    return rules.get('policy') in ('domain_basic','domain_advanced','domain_unified')
+
+
+def domain_group_score(rules,payload,min_score):
+    import group_policy
+    if payload.get('read_complete') is False:
+        return dict(eligible=False,score=0,trigger='score_incomplete',hits=[],requirements={},scoring_complete=False)
+    cfg=rules.get('fulltext_groups')
+    if not isinstance(cfg,dict): return None
+    value=group_policy.text(payload)
+    if not value.strip(): return dict(eligible=False,score=0,trigger='unreadable',hits=[],requirements={},scoring_complete=False)
+    # Only positive personal evidence contributes to either group or score.
+    groups={key:[h['word'] for h in positive_hits(value,cfg.get(key,[]))] for key in ('a','b')}
+    clean=dict(rules,fulltext_groups=dict(cfg,a=groups['a'],b=groups['b']))
+    result=group_policy.evaluate(clean,payload)
+    if result is None: return None
+    statuses=payload.get('requirement_states',{})
+    required=('brand_work','domain','independent','vendor','team','travel') if rules['policy']=='domain_advanced' else ('domain','vendor')
+    hard=not any(statuses.get(k)=='failed' for k in required)
+    keyword=bool(result.get('direct_channels'))
+    score=result['score']; by_score=score>=min_score
+    result.update(eligible=hard and (keyword or by_score),trigger=('both' if keyword and by_score else 'keyword' if keyword else 'score') if hard and (keyword or by_score) else 'none',requirements={k:statuses.get(k,'unknown') for k in required},scoring_complete=True,scoring_rule_version=rules.get('version'))
+    return result
