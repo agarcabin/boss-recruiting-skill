@@ -106,6 +106,12 @@ def connect(db_path: Path) -> sqlite3.Connection:
             paused_seconds INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS candidates_sent_at ON candidates(sent_at);
+        CREATE TABLE IF NOT EXISTS list_judgments (
+            run_id TEXT NOT NULL,
+            candidate_hash TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            PRIMARY KEY(run_id, candidate_hash)
+        );
         CREATE INDEX IF NOT EXISTS candidates_run ON candidates(run_id, status);
         CREATE INDEX IF NOT EXISTS candidate_progress_active ON candidate_progress(run_id, finished_at);
         """

@@ -138,6 +138,11 @@ class Runner:
             self.data['facts']=facts
             matched=recruiting_rules.list_match(rules,facts)
             if not matched['configured']:raise ValueError('list_prefilter_vocabulary_not_configured')
+            recorded=self.db.execute('INSERT OR IGNORE INTO list_judgments VALUES (?,?,?)',
+                (self.run,self.data['visit_hash'],self.data['started_at']))
+            if recorded.rowcount:
+                candidate_log.workbook(self.db,self.root,self.data['started_at'],profile_path=run['profile_path'])
+                report_batch.flush_now(self.db)
             if not matched['eligible']:
                 self.record_payload(dict(facts,decision='skip' if matched['readable'] else 'review',overall_score=0,
                     electronic_resume_enabled=False,hard_requirements=False,

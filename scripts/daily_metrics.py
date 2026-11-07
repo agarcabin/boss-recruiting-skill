@@ -56,7 +56,7 @@ def projected_counts(db,profile,at):
 
 
 def overlay_counts(db,profile,at,data=None):
-    """Completed decisions and confirmed resume opens for this job/Shanghai day."""
+    """List/detail decisions counted once per visit, and confirmed resume opens."""
     import report_store
     data=rows(db,profile,at) if data is None else data
     start=datetime.fromisoformat(report_store.day(at)).replace(tzinfo=CN_TZ)
@@ -73,7 +73,13 @@ def overlay_counts(db,profile,at,data=None):
         WHERE i.job=? AND julianday(p.started_at)>=julianday(?) AND julianday(p.started_at)<julianday(?)
         AND (p.electronic_opened_at IS NOT NULL'''+receipt+')',
         (job,start.isoformat(),finish.isoformat())).fetchone()[0]
-    return dict(judged=len({(r['run_id'],r['candidate_hash']) for r in data}),resume_viewed=viewed,
+    judged={(r['run_id'],r['candidate_hash']) for r in data}
+    judged.update((r['run_id'],r['candidate_hash']) for r in db.execute('''
+        SELECT j.run_id,j.candidate_hash FROM list_judgments j
+        JOIN run_identity i ON i.run_id=j.run_id
+        WHERE i.job=? AND julianday(j.started_at)>=julianday(?) AND julianday(j.started_at)<julianday(?)''',
+        (job,start.isoformat(),finish.isoformat())))
+    return dict(judged=len(judged),resume_viewed=viewed,
                 sent=sum(confirmed_sent(r) for r in data))
 
 
