@@ -226,7 +226,7 @@ function Set-ResumeScrollPercent([double]$Percent) {
         throw $context.reason
     }
     Invoke-CaptureGuard {
-        Assert-BossBrowserTarget $context.element $WindowHandle
+        Assert-BossBrowserTarget $context.wrapper $WindowHandle
         $context.pattern.SetScrollPercent([System.Windows.Automation.ScrollPattern]::NoScroll,$Percent)
     }
     Start-Sleep -Milliseconds 650

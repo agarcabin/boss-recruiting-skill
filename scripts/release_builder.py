@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
-VERSION='1.4.3'
+VERSION='1.4.5'
 def issuer_path():return project_vault.state_dir()/'publisher'/'issuer.dpapi'
 def issuer():
     if not issuer_path().is_file():raise ValueError('publisher_key_missing_restore_before_build')
@@ -30,7 +30,7 @@ def write_pin(root,record):
     crypto.atomic(Path(root)/'scripts/publisher_pin.py',("PUBLIC_KEY_B64 = "+repr(crypto.b64(public))+"\n").encode())
     return public
 
-def collect(root):
+def collect(root,include_user_projects=False):
     root=Path(root)
     if project_vault.vault_path(root).is_file():
         payload=project_vault.decode(project_vault.envelope(root),crypto.raw(issuer()['data_key']))
@@ -38,14 +38,15 @@ def collect(root):
     else:
         rules=json.loads((root/'references/recruiting-rules.json').read_text(encoding='utf-8-sig'))
         payload={};known=None
-    files={}
+    files={};project_names=set()
     for path in (root/'profiles').rglob('*'):
         if not path.is_file() or path.suffix not in ('.md','.json'):continue
         name=path.relative_to(root).as_posix()
         metadata=path if path.name=='project.json' else path.parent/'project.json'
         if metadata.is_file():
             item=json.loads(metadata.read_text(encoding='utf-8-sig'))
-            if item.get('origin')=='user':continue
+            if item.get('origin')=='user' and not include_user_projects:continue
+            if item.get('company'):project_names.add(item['company'])
         elif known is not None and name not in known:continue
         files[name]=crypto.b64(path.read_bytes())
     if not files:raise ValueError('no_builtin_projects_to_encrypt')
@@ -53,7 +54,7 @@ def collect(root):
                 aliases=rules.get('identifier_aliases',payload.get('aliases',{})),
                 legacy_defaults=rules.get('legacy_defaults',payload.get('legacy_defaults',{})),
                 source_renames=rules.get('source_renames',payload.get('source_renames',{})),
-                redactions=rules.get('private_redactions',payload.get('redactions',[])))
+                redactions=sorted(set(rules.get('private_redactions',payload.get('redactions',[])))|project_names))
 
 def materials(directory):
     result={}
@@ -158,12 +159,12 @@ def sanitize_text(text,payload):
         if word:text=text.replace(word,'ExampleEntity'+str(index))
     return text
 
-def build(root,output,public_root,legacy_dir=None):
+def build(root,output,public_root,legacy_dir=None,include_user_projects=False):
     root=Path(root);output=Path(output);public_root=Path(public_root)
     from skill_update import installed_version
     version=installed_version(root)
     if public_root.exists() and any(public_root.iterdir()):raise ValueError('public_source_target_must_be_empty')
-    record=issuer();payload=collect(root);legacy=materials(legacy_dir)
+    record=issuer();payload=collect(root,include_user_projects);legacy=materials(legacy_dir)
     if not project_vault.vault_path(root).is_file():
         material=(root/'SKILL.md').read_bytes()
         if material not in legacy:legacy.append(material)
@@ -175,6 +176,7 @@ def build(root,output,public_root,legacy_dir=None):
     public_root.mkdir(parents=True,exist_ok=True)
     installed_manifest=root/'release-manifest.json'
     allowed=set(json.loads(installed_manifest.read_text(encoding='utf-8'))['files']) if project_vault.vault_path(root).is_file() and installed_manifest.is_file() else None
+    if allowed is not None:allowed.add('references/v'+version+'-policy.md')
     for name in ('scripts','references','agents'):
         for path in (root/name).rglob('*'):
             if not path.is_file() or path.suffix not in ('.py','.ps1','.md','.json','.yaml','.yml','.txt') or '__pycache__' in path.parts:continue
@@ -204,7 +206,7 @@ def build(root,output,public_root,legacy_dir=None):
         path=root/'references'/name
         content=path.read_text(encoding='utf-8-sig') if path.is_file() else fallback
         (public_root/'references'/name).write_text(sanitize_text(content,payload),encoding='utf-8')
-    for name in ('progress-window.md','project-operations.md'):
+    for name in ('progress-window.md','project-operations.md','v'+version+'-policy.md'):
         path=root/'references'/name
         if path.exists():(public_root/'references'/name).write_text(sanitize_text(path.read_text(encoding='utf-8-sig'),payload),encoding='utf-8')
     (public_root/'update-source.json').write_bytes((root/'update-source.json').read_bytes())
@@ -238,6 +240,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('command',choices=['init','build'])
     p.add_argument('--root',type=Path,default=Path(__file__).resolve().parents[1]);p.add_argument('--output',type=Path)
     p.add_argument('--public-root',type=Path);p.add_argument('--legacy-dir',type=Path);p.add_argument('--password-stdin',action='store_true');p.add_argument('--password-prompt',action='store_true')
+    p.add_argument('--include-user-projects',action='store_true',help='Include self-created projects in the encrypted snapshot only when explicitly requested.')
     a=p.parse_args()
     if a.command=='init':
         if not a.password_stdin and not a.password_prompt:raise ValueError('use_password_stdin_or_prompt')
@@ -250,6 +253,6 @@ def main():
         result=initialize(a.root,password)
     else:
         if not a.output or not a.public_root:raise ValueError('output_and_public_root_required')
-        result=build(a.root,a.output,a.public_root,a.legacy_dir)
+        result=build(a.root,a.output,a.public_root,a.legacy_dir,a.include_user_projects)
     print(json.dumps(result,ensure_ascii=False))
 if __name__=='__main__':main()

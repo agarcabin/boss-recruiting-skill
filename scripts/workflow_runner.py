@@ -56,7 +56,15 @@ class Runner:
     def handoff(self,kind,payload):
         path=self.folder/(self.data['visit_hash']+'-'+kind+'.json')
         response=path.with_suffix('.response.json')
-        if not path.exists():path.write_text(json.dumps(dict(kind=kind,candidate=self.data['candidate'],evidence=payload),ensure_ascii=False,indent=2),encoding='utf-8')
+        request=dict(kind=kind,candidate=self.data['candidate'],evidence=payload)
+        previous=json.loads(path.read_text(encoding='utf-8-sig')) if path.exists() else None
+        if previous!=request:
+            # A recovered capture can change the evidence for the same visit.
+            # Never pair the new score with an answer written for old evidence.
+            response.unlink(missing_ok=True)
+            temporary=path.with_suffix('.tmp')
+            temporary.write_text(json.dumps(request,ensure_ascii=False,indent=2),encoding='utf-8')
+            os.replace(temporary,path)
         self.data.update(request_file=str(path),response_file=str(response),handoff_kind=kind)
         return self.status('needs_'+kind)
 
@@ -94,18 +102,28 @@ class Runner:
             if reason:
                 self.phase='complete';self.data['completion_reason']=reason
                 return self.status('complete')
+            if recruiting_rules.run_rules(run).get('list_prefilter'):
+                self.adapter.close()
+                self.data.pop('prefetched',None)
             candidate=self.data.pop('prefetched',None) or self.adapter.select(self.data.get('processed',[]))
             if candidate is None:return self.status('needs_page')
             self.data.update(candidate=candidate,warnings=[],attempts=0)
             self.phase='open';return None
         if phase=='open':
-            if mode!='worker_resume':self.adapter.open(candidate,mode)
+            list_filter=bool(recruiting_rules.run_rules(run).get('list_prefilter'))
+            if mode!='worker_resume' and not list_filter:self.adapter.open(candidate,mode)
             if worker_v2 and candidate.get('already_open'):
                 self.adapter.open(candidate,mode)
             active=ledger.ensure_candidate(self.db,self.run,cid,new_visit=True)
             self.data.update(visit_hash=active['candidate_hash'],started_at=active['started_at'])
             self.data['visit_started_active']=short_view_wait.active_clock(self.db,self.run)
             self.data['excluded_wait_seconds']=0
+            if mode=='resume' and not list_filter or worker_v2 and candidate.get('already_open'):
+                call(ledger.electronic_opened,self.db,run=self.run,candidate_id=cid)
+            if list_filter:
+                if candidate.get('already_open'):raise ValueError('list_prefilter_requires_visible_card')
+                self.phase='list_prefilter'
+                return None
             if worker_v2 and candidate.get('already_open'):
                 candidate_checks.mark_resume_opened(self.db,self.run,cid)
                 self.data['resume_started_active']=short_view_wait.active_clock(self.db,self.run)
@@ -113,6 +131,33 @@ class Runner:
             else:
                 self.phase=('worker_read' if candidate.get('already_open') else 'worker_list') if mode=='worker_resume' else 'coworker'
             return None
+        if phase=='list_prefilter':
+            rules=recruiting_rules.run_rules(run)
+            facts=self.adapter.prefilter(candidate)
+            facts.update(evaluation_stage='list',worker_stage='list')
+            self.data['facts']=facts
+            matched=recruiting_rules.list_match(rules,facts)
+            if not matched['configured']:raise ValueError('list_prefilter_vocabulary_not_configured')
+            if not matched['eligible']:
+                self.record_payload(dict(facts,decision='skip' if matched['readable'] else 'review',overall_score=0,
+                    electronic_resume_enabled=False,hard_requirements=False,
+                    pros='列表未命中岗位词库，未打开简历' if matched['readable'] else '列表卡片不可读，未作岗位评估',
+                    cons='未读取电子简历，优缺点未评估'))
+                self.phase='finish';return None
+            self.phase='list_open';return None
+        if phase=='list_open':
+            try:self.adapter.open(candidate,mode)
+            except ValueError as exc:
+                if str(exc) not in ('resume_not_opened','resume_open_control_not_available'):raise
+                self.record_payload(dict(self.data['facts'],decision='review',overall_score=0,
+                    electronic_resume_enabled=False,hard_requirements=False,
+                    pros='电子简历未成功打开，未作岗位评估',cons=str(exc)))
+                self.phase='finish';return None
+            call(ledger.electronic_opened,self.db,run=self.run,candidate_id=cid)
+            if worker_v2:
+                candidate_checks.mark_resume_opened(self.db,self.run,cid)
+                self.data['resume_started_active']=short_view_wait.active_clock(self.db,self.run)
+            self.phase='coworker';return None
         if phase=='worker_list':
             facts=self.adapter.prefilter(candidate);self.data['facts']=facts
             match=recruiting_rules.worker_match(recruiting_rules.run_rules(run),facts)
@@ -121,6 +166,7 @@ class Runner:
             self.phase='worker_open';return None
         if phase=='worker_open':
             self.adapter.open(candidate,'worker_resume')
+            call(ledger.electronic_opened,self.db,run=self.run,candidate_id=cid)
             if worker_v2:
                 candidate_checks.mark_resume_opened(self.db,self.run,cid)
                 self.data['resume_started_active']=short_view_wait.active_clock(self.db,self.run)
@@ -169,7 +215,7 @@ class Runner:
         if phase=='assess':
             facts=dict(self.data['facts'])
             rules=recruiting_rules.run_rules(run)
-            if recruiting_rules.is_domain(rules) and facts.get('read_complete') is False:
+            if (recruiting_rules.is_domain(rules) or rules.get('list_prefilter')) and facts.get('read_complete') is not True:
                 self.record_payload(dict(facts,decision='review',overall_score=0,electronic_resume_enabled=False,hard_requirements=False,pros='正文未完整读取，尚未完成评分',cons='保留实际材料，未发送'))
                 self.phase='finish';return None
             if self.data.get('handoff_kind')=='assessment':
@@ -193,9 +239,23 @@ class Runner:
                     answer=self.response()
                     if answer:payload=dict(facts,**answer)
                     else:return self.handoff('assessment',facts)
+            if rules.get('ai_pros_cons') and self.data.get('handoff_kind')!='assessment':
+                self.data['assessed_payload']=payload
+                self.phase='summarize'
+                return self.handoff('summary',dict(facts=facts,scoring=payload,instruction='根据已读资料分别总结优点、缺点；不复述命中词，不编造，缺失信息注明待核实。只返回pros和cons。'))
             self.record_payload(payload)
             self.data.pop('request_file',None);self.data.pop('response_file',None)
             self.data.pop('handoff_kind',None)
+            self.phase='send' if self.data['decision']=='greet' else 'favorite';return None
+        if phase=='summarize':
+            answer=self.response()
+            if not answer:return self.status('needs_summary')
+            if not all(isinstance(answer.get(k),str) and answer[k].strip() for k in ('pros','cons')):
+                raise ValueError('summary_requires_evidence_based_pros_and_cons')
+            payload=dict(self.data['assessed_payload'],pros=answer['pros'].strip(),cons=answer['cons'].strip())
+            self.record_payload(payload)
+            self.data.pop('assessed_payload',None)
+            for key in ('request_file','response_file','handoff_kind'):self.data.pop(key,None)
             self.phase='send' if self.data['decision']=='greet' else 'favorite';return None
         if phase=='send':
             reservation=call(ledger.reserve,self.db,run=self.run,candidate_id=cid)
@@ -269,7 +329,8 @@ class Runner:
                 self.data['worker_streak_counted']=True
             clock_key='resume_started_active' if worker_v2 else 'visit_started_active'
             elapsed=max(0,short_view_wait.active_clock(self.db,self.run)-self.data.get(clock_key,0)-self.data.get('excluded_wait_seconds',0))
-            wait=(dict(state='ready',retry_after_seconds=0,seconds=0) if worker_v2 and self.data.get(clock_key) is None
+            list_only=bool(recruiting_rules.run_rules(run).get('list_prefilter') and self.data.get('facts',{}).get('evaluation_stage')=='list' and self.phase=='next' and self.data.get('decision') in ('skip','review') and not self.data.get('coworker'))
+            wait=(dict(state='ready',retry_after_seconds=0,seconds=0) if list_only or (worker_v2 and self.data.get(clock_key) is None)
                   else short_view_wait.plan(self.db,self.run,self.data['visit_hash'],elapsed))
             self.data['short_view_wait']=wait
             quota=greeting_rate.status(self.db)
@@ -278,7 +339,9 @@ class Runner:
                 self.data['rate_limit']=quota
                 return self.status('short_view_wait' if wait['retry_after_seconds'] else 'rate_limited')
             browse=self.data.get('worker_browse',dict(misses=0,seen=[]))
-            if mode=='worker_resume' and browse['misses']>=5:
+            if recruiting_rules.run_rules(run).get('list_prefilter'):
+                self.adapter.close();navigation=dict(returned_to_list=True)
+            elif mode=='worker_resume' and browse['misses']>=5:
                 self.adapter.close();navigation=dict(returned_to_list=True)
             else:navigation=self.adapter.next(candidate,mode)
             if navigation and navigation.get('returned_to_list'):browse=dict(misses=0,seen=[])

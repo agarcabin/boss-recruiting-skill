@@ -66,10 +66,10 @@ def install(root,files,backups,database=None,runtime_source=None):
                     value=project_vault.envelope(stage)
                     key,_=project_vault.resolve_key(value,stage,upgrade_from=root)
                     if key is not None:private=project_vault.safe_files(project_vault.decode(value,key))
-                combined={**files,**private}
                 for name in private:
-                    path=target(root,name);meta=path if path.name=='project.json' else path.parent/'project.json'
-                    if meta.is_file() and json.loads(meta.read_text(encoding='utf-8-sig')).get('origin')=='user':raise ValueError('user_project_collision_install_aborted')
+                    target(root,name)
+                private=project_vault.preserve_user_projects(private,root,'user_project_collision_install_aborted')
+                combined={**files,**private}
                 atomic(backup/'installation.json',canonical(record))
                 # Freeze original identities before any project file changes.
                 with contextlib.closing(sqlite3.connect(database,isolation_level=None)) as db:

@@ -38,10 +38,10 @@ except (AttributeError, OSError):
     pass
 
 CN_TZ = timezone(timedelta(hours=8))
-SUMMARY_HEADERS = ["录入时间", "候选人", "综合分", "判定", "判断时长", "优点", "劣势", "触发方式", "招呼结果", "查看简历"]
+SUMMARY_HEADERS = ["录入时间", "候选人", "综合分", "判定", "判断时长", "优点", "缺点", "命中词", "触发方式", "招呼结果", "查看简历"]
 DETAIL_HEADERS = ["录入时间", "项目", "岗位", "运行编号", "候选人", "候选人标识哈希", "开始时间", "结束时间",
                   "判断时长", "判断时长（秒）", "列表分", "列表依据", "电子简历分", "电子简历依据",
-                  "附件简历分", "附件依据", "综合分", "硬条件", "硬条件例外授权", "判定", "发送状态", "优点", "劣势",
+                  "附件简历分", "附件依据", "综合分", "硬条件", "硬条件例外授权", "判定", "发送状态", "优点", "缺点", "命中词",
                   "电子简历判断", "PDF归档", "PDF路径", "PDF说明",
                   "简历图片", "简历OCR文本", "简历OCR结果", "简历归档", "简历归档说明",
                   "同事去重", "首条同事招呼时间", "同事去重依据"]
@@ -261,7 +261,7 @@ def _render_workbook(db, root: Path, started_at: str, filename: str | None = Non
         overall_score = None if coworker_skipped or coworker_unknown or score_incomplete else row["overall_score"]
         hits=json.loads(row['eligibility_json'] or '{}').get('hits',[])
         summary.append([entered_at, row["candidate_name"], overall_score, label, duration,
-                        hit_summary.visible(hits,row["pros"],row["electronic_evidence"]), hit_summary.display(row["cons"],hits), json.loads(row["eligibility_json"] or "{}").get("trigger","score"),
+                        row["pros"], row["cons"], hit_summary.grouped(hits), json.loads(row["eligibility_json"] or "{}").get("trigger","score"),
                         message_summary(db,row), "查看名片" if row["evaluation_mode"]=="card" else "查看简历"])
         link_cell = summary.cell(row=summary.max_row, column=len(SUMMARY_HEADERS))
         evidence_image=row["card_image_path"] if row["evaluation_mode"]=="card" else row["resume_image_path"]
@@ -279,7 +279,7 @@ def _render_workbook(db, root: Path, started_at: str, filename: str | None = Non
                         "符合" if row["hard_requirements"] == "true" else "未确认/不符",
                         row["hard_requirement_override_note"] if row["hard_requirement_override"] == "true" else "否",
                         label,
-                        row["send_status"], row["pros"], row["cons"],
+                        row["send_status"], row["pros"], row["cons"], hit_summary.grouped(hits),
                         "未评估（同事去重）" if coworker_skipped else ("开启" if row["electronic_enabled"] else "关闭"),
                         row["pdf_status"], row["pdf_path"] or "", row["pdf_note"] or "",
                         row["resume_image_path"] or "", row["resume_ocr_text_path"] or "",
@@ -320,7 +320,8 @@ def _render_workbook(db, root: Path, started_at: str, filename: str | None = Non
     summary.column_dimensions["E"].width = 14
     summary.column_dimensions["F"].width = 48
     summary.column_dimensions["G"].width = 48
-    summary.column_dimensions["H"].width = 14
+    summary.column_dimensions["H"].width = 48
+    summary.column_dimensions["I"].width = 14
     for hidden_header in ("触发方式", "招呼结果"):
         summary.column_dimensions[
             get_column_letter(headers.index(hidden_header) + 1)
@@ -331,6 +332,7 @@ def _render_workbook(db, root: Path, started_at: str, filename: str | None = Non
             52, max(13, max(len(str(c.value or "")) for c in col[:100]) + 2)
         )
     report_store.add_summary_header(summary,db,profile_path,started_at,rows)
+    daily_metrics.append_overlay_counts(wb,db,profile_path,started_at,rows)
     import resume_diagnostics
     resume_diagnostics.append_sheet(wb,db,profile_path,started_at,run_id=run_id,report_rows=rows)
     report_store.append_results(wb,db,started_at,profile_path,rows)
@@ -365,7 +367,8 @@ def record(db, args, payload=None):
     if active is None:active=ledger.ensure_candidate(db,args.run,payload['candidate_id'],payload.get('started_at'))
     payload["started_at"]=active['started_at']
     unscored=None
-    worker_unchecked=(rules.get('mode')=='worker_resume' and payload['decision']!='greet' and not payload.get('coworker_progress'))
+    list_unchecked=bool(rules.get('list_prefilter') and payload.get('evaluation_stage')=='list' and payload['decision']!='greet')
+    worker_unchecked=list_unchecked or (rules.get('mode')=='worker_resume' and payload['decision']!='greet' and not payload.get('coworker_progress'))
     if worker_unchecked: payload['coworker_progress']={'state':'not_checked','action':'not_applicable','evidence':'关键词未命中或正文不可读，未检查同事记录'}
     if rules.get('mode')!='card' and not worker_unchecked:
         observation=payload.get('coworker_progress') or candidate_checks.get(db,args.run,payload['candidate_id'])
@@ -382,7 +385,7 @@ def record(db, args, payload=None):
                 payload.pop('electronic',None);payload.pop('resume_evidence',None)
             unscored=dict(eligible=False,score=0,trigger='coworker_skip' if checked.get('skip') else 'coworker_unknown',hits=recruiting_rules.worker_match(rules,payload)['hits'] if rules.get('mode')=='worker_resume' else [],requirements={})
     if payload.get("overall_score") is not None:payload.setdefault("score_before_experience",payload["overall_score"])
-    result=unscored or (None if rules.get('mode')=='worker_resume' else fast_assessment.evaluate(rules,payload,recruiting_rules.positive_hits))
+    result=unscored or (None if list_unchecked or rules.get('mode')=='worker_resume' else fast_assessment.evaluate(rules,payload,recruiting_rules.positive_hits))
     if result and result.get('method')=='direct_rule':payload=fast_assessment.fill(payload,result)
     if result is None:result=recruiting_rules.evaluate(rules,payload,run['min_score'])
     if rules.get("policy","legacy") != "legacy":

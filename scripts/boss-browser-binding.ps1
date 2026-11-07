@@ -2,10 +2,10 @@
 function Get-BossBrowserRoot([long]$Handle=0) {
  if(!$env:BOSS_BROWSER_BINDING -or !(Test-Path -LiteralPath $env:BOSS_BROWSER_BINDING)){throw 'codex_iab_binding_required'}
  $b=Get-Content -LiteralPath $env:BOSS_BROWSER_BINDING -Raw -Encoding UTF8|ConvertFrom-Json
- if($b.browser_target -ne 'codex_iab' -or !$b.tab_id -or !$b.chat_title){throw 'invalid_codex_iab_binding'}
+ if($b.browser_target -ne 'codex_iab' -or !$b.chat_title){throw 'invalid_codex_iab_binding'}
  if($Handle -and $Handle -ne [long]$b.hwnd){throw 'external_browser_window_forbidden'}
  $process=Get-Process -Id $b.process_id -ErrorAction Stop
- if($process.ProcessName -ne 'Codex' -or $process.StartTime.ToUniversalTime().Ticks.ToString() -ne [string]$b.process_started_ticks){throw 'codex_iab_host_changed'}
+ if($process.ProcessName -notin @('Codex','ChatGPT') -or $process.StartTime.ToUniversalTime().Ticks.ToString() -ne [string]$b.process_started_ticks){throw 'codex_iab_host_changed'}
  $hostRoot=[System.Windows.Automation.AutomationElement]::FromHandle([IntPtr][long]$b.hwnd)
  if(!$hostRoot -or $hostRoot.Current.ProcessId -ne $b.process_id){throw 'codex_iab_window_changed'}
  $dc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Document)

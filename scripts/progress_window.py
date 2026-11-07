@@ -337,7 +337,11 @@ def metrics_text(data):
     pending=" · 表格待同步" if data.get('report_pending') else ""
     average=data.get('viewing_average_seconds')
     speed='--' if average is None else f'{average:g}'
-    return f"今日已查看 {data.get('daily_viewed',0)} 人 · 已招呼 {data.get('daily_sent',0)} 人 · 平均速度 {speed} 秒/人 · 预计剩余 {remaining}{pending}"
+    judged=data.get('daily_judged',0)
+    viewed=data.get('daily_resume_viewed',0)
+    judged='--' if judged is None else judged
+    viewed='--' if viewed is None else viewed
+    return f"今日已判断 {judged} 人，已查看 {viewed} 人，已招呼 {data.get('daily_sent',0)} 人 · 平均速度 {speed} 秒/人 · 预计剩余 {remaining}{pending}"
 
 
 def button_geometry(scale=1.0):
@@ -353,7 +357,7 @@ class ProgressWindow:
         self.wake = KeepAwake()
         self.timer: str | None = None
         self.last_codex_check = 0.0
-        self.detail_metrics_key: tuple[int, int, int, int | None] | None = None
+        self.detail_metrics_key: tuple | None = None
         self.pause_enabled = False
         logical_screen_width = max(1, root.winfo_screenwidth())
         physical_screen_width = ctypes.windll.user32.GetSystemMetrics(0) if os.name == "nt" else logical_screen_width
@@ -465,12 +469,6 @@ class ProgressWindow:
         self.button_canvas.tag_bind("button-1", "<Button-1>", lambda _e: self.stop())
         self.button_canvas.tag_bind("button-2", "<Button-1>", lambda _e: self.open_report())
 
-        import short_view_wait
-        with contextlib.closing(ledger.connect(self.db_path)) as db:
-            selected=short_view_wait.enabled(db,self.run_id)
-        self.short_wait_var=tk.BooleanVar(value=selected)
-        self.short_wait_check=tk.Checkbutton(root,text='短查看随机等待',variable=self.short_wait_var,command=self.toggle_short_wait,bg=PANEL_BG,fg=PANEL_MUTED,selectcolor=PANEL_BG,activebackground=PANEL_BG,activeforeground=PANEL_FG,font=('Microsoft YaHei UI',8),borderwidth=0,highlightthickness=0)
-        self.short_wait_check.place(x=round(TEXT_LEFT/self.ui_scale),y=round(61/self.ui_scale))
         root.update_idletasks()
         self.button_window.update_idletasks()
         configure_overlay_windows(root, self.button_window)
@@ -478,11 +476,6 @@ class ProgressWindow:
         self.button_window.protocol("WM_DELETE_WINDOW", self.stop)
         self.keep_codex_maximized()
         self.refresh()
-
-    def toggle_short_wait(self):
-        import short_view_wait
-        with contextlib.closing(ledger.connect(self.db_path)) as db:
-            short_view_wait.set_enabled(db,self.run_id,self.short_wait_var.get())
 
     def _hover_button(self, index: int, hovering: bool) -> None:
         enabled = self.button_enabled[index]
@@ -545,7 +538,7 @@ class ProgressWindow:
             self.status_canvas.itemconfigure(
                 self.state_item, text=f"{labels[state]} · {data['elapsed']} · {step}"
             )
-            metrics_key = (data.get("daily_viewed"),data.get("daily_sent"),data["remaining_minutes"],data.get("report_pending"),data.get('viewing_average_seconds'))
+            metrics_key = (data.get("daily_judged"),data.get("daily_resume_viewed"),data.get("daily_sent"),data["remaining_minutes"],data.get("report_pending"),data.get('viewing_average_seconds'))
             if metrics_key != self.detail_metrics_key:
                 self.status_canvas.itemconfigure(self.detail_item, text=metrics_text(data))
                 self.detail_metrics_key = metrics_key

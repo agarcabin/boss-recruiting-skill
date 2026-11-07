@@ -135,4 +135,42 @@ class CryptoTests(unittest.TestCase):
         vault_crypto.verify(dict(value='fixture'),signature,public)
         with self.assertRaises(InvalidSignature):vault_crypto.verify(dict(value='changed'),signature,public)
 
+class SnapshotProjectTests(unittest.TestCase):
+    def setUp(self):
+        import project_vault
+        self.vault=project_vault
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name)
+        self.name='profiles/SampleCompany/job/project.json'
+        self.profile='profiles/SampleCompany/job/profile.md'
+    def files(self,origin='user',identity='sample-job'):
+        return {self.name:json.dumps(dict(origin=origin,project_id=identity,company='SampleCompany')).encode(),self.profile:b'snapshot'}
+    def local(self):
+        for name,data in self.files().items():
+            path=self.root/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(data)
+        (self.root/self.profile).write_bytes(b'local edits')
+    def test_fresh_install_seeds_full_snapshot(self):
+        files=self.files()
+        self.assertEqual(self.vault.preserve_user_projects(files,self.root),files)
+    def test_upgrade_keeps_entire_matching_user_project(self):
+        self.local()
+        self.assertEqual(self.vault.preserve_user_projects(self.files(),self.root),{})
+        self.assertEqual((self.root/self.profile).read_bytes(),b'local edits')
+    def test_other_id_or_bundle_collision_remains_rejected(self):
+        self.local()
+        for files in (self.files(identity='different'),self.files(origin='bundle'),{self.profile:b'missing metadata'}):
+            with self.assertRaisesRegex(ValueError,'private_project_user_collision'):
+                self.vault.preserve_user_projects(files,self.root)
+    def test_collect_default_excludes_user_and_explicit_snapshot_encrypts_it(self):
+        import release_builder
+        self.local();refs=self.root/'references';refs.mkdir()
+        (refs/'recruiting-rules.json').write_text('{}')
+        other=self.root/'profiles/SampleCompany/builtin';other.mkdir()
+        (other/'project.json').write_text(json.dumps(dict(origin='bundle',project_id='builtin')))
+        (other/'profile.md').write_text('builtin')
+        default=release_builder.collect(self.root)
+        complete=release_builder.collect(self.root,include_user_projects=True)
+        self.assertNotIn(self.name,default['files']);self.assertIn(self.name,complete['files'])
+        self.assertIn('SampleCompany',complete['redactions'])
+
 if __name__=='__main__':unittest.main()

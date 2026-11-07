@@ -13,14 +13,20 @@ from windows_process import hidden_options
 def run(db,run_id,generation,command):
     with run_safety.action_lock(db):
         state=run_safety.ensure_writable(db,run_id,generation)
-        process=subprocess.Popen(command,**hidden_options())
+        process=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,**hidden_options())
         db.execute('INSERT INTO run_helpers VALUES (?,?,?)',(run_id,process.pid,run_safety.process_birth(process.pid)))
     try:
-        while process.poll() is None:
+        while True:
             state=ledger.run_row(db,run_id)
             if state['stop_reason'] or state['generation']!=generation:
-                process.kill();process.wait(timeout=2);raise ValueError('helper_cancelled')
-            time.sleep(.2)
+                process.kill();process.communicate(timeout=2);raise ValueError('helper_cancelled')
+            try:
+                stdout,stderr=process.communicate(timeout=.2)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        sys.stdout.buffer.write(stdout);sys.stdout.buffer.flush()
+        sys.stderr.buffer.write(stderr);sys.stderr.buffer.flush()
         return process.returncode
     finally:
         if process.poll() is None: process.kill();process.wait(timeout=2)

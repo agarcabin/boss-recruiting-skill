@@ -152,8 +152,29 @@ def safe_files(data):
         result[name]=content
     return result
 
+def preserve_user_projects(files,root,collision_error='private_project_user_collision'):
+    """A full snapshot may seed user projects; upgrades keep their local edits."""
+    root=Path(root).resolve();preserved=set()
+    for name in files:
+        path=root/name
+        if not path.resolve().is_relative_to(root):raise ValueError('private_path_escape')
+        for parent in (path,*path.parents):
+            if parent==root.parent:break
+            if parent.is_symlink() or getattr(parent,'is_junction',lambda:False)():raise ValueError('private_local_link')
+        meta=path if path.name=='project.json' else path.parent/'project.json'
+        if not meta.is_file():continue
+        current=json.loads(meta.read_text(encoding='utf-8-sig'))
+        if current.get('origin')!='user':continue
+        incoming=files.get(meta.relative_to(root).as_posix())
+        snapshot=json.loads(incoming.decode('utf-8-sig')) if incoming else {}
+        if snapshot.get('origin')!='user' or not current.get('project_id') or current['project_id']!=snapshot.get('project_id'):
+            raise ValueError(collision_error)
+        preserved.add(meta.parent.relative_to(root).as_posix())
+    return {name:content for name,content in files.items() if str(PurePosixPath(name).parent) not in preserved}
+
+
 def apply(data,root=None,backup=None,ticket=None):
-    root=Path(root) if root else ROOT;files=safe_files(data)
+    root=Path(root) if root else ROOT;files=preserve_user_projects(safe_files(data),root)
     # Installed project snapshots remain at their original paths for historical runs.
     backup=Path(backup) if backup else state_dir()/'updates/vault-backups'/uuid.uuid4().hex
     backup.mkdir(parents=True,exist_ok=True)

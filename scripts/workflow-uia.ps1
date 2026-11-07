@@ -1,5 +1,5 @@
 param(
- [ValidateSet('Select','PageJob','ResumePresence','Resume','ResumeFull','Greeting','Next','Close','CoworkerTab')][string]$Action='Select',
+ [ValidateSet('Select','PageJob','ResumePresence','Resume','ResumeFull','Greeting','Next','Close','CoworkerTab','RelatedClose','CardOpen')][string]$Action='Select',
  [long]$WindowHandle,[string]$SkipFile,[string]$CardRuntime
 )
 $OutputEncoding=[Text.UTF8Encoding]::new($false);[Console]::OutputEncoding=$OutputEncoding
@@ -21,6 +21,20 @@ foreach($d in (Get-BossDocuments $root)){
 }
 if(!$docs.Count){throw 'boss_document_unavailable'}
 function Target($node,$url){return @{browser_binding_id=(Get-BossBindingId);hwnd=$WindowHandle;runtime_id=$node.GetRuntimeId();name=$node.Current.Name;class_name=$node.Current.ClassName;document_url=$url}}
+if($Action -eq 'RelatedClose'){
+ $cc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ClassNameProperty,'boss-popup__close')
+ $hits=@()
+ foreach($node in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants,$cc)){
+  if($node.Current.IsOffscreen){continue}
+  $wrapper=[System.Windows.Automation.TreeWalker]::RawViewWalker.GetParent($node)
+  $dialog=[System.Windows.Automation.TreeWalker]::RawViewWalker.GetParent($wrapper)
+  if($wrapper.Current.ClassName -match '\banonymous-geek-guide-list-wrapper\b' -and $dialog.Current.ClassName -match '(^| )active($| )' -and $dialog.Current.ClassName -notmatch 'deactive'){
+   $hits+=@{label='Close related recommendations';target=(Target $node 'https://www.zhipin.com/web/chat/recommend')}
+  }
+ }
+ if($hits.Count -eq 1){@{state='found';match=$hits[0]}|ConvertTo-Json -Depth 6 -Compress}else{@{state='unavailable';count=$hits.Count}|ConvertTo-Json -Compress}
+ exit
+}
 if($Action -eq 'PageJob'){
  $labels=[Collections.Generic.HashSet[string]]::new()
  foreach($class in @('job-select','job-name','position-select','selected-job')){
@@ -43,6 +57,21 @@ function Invoker($node){
   while($child){$queue.Enqueue(@{node=$child;depth=$item.depth+1});$child=[System.Windows.Automation.TreeWalker]::RawViewWalker.GetNextSibling($child)}
  }
  return $null
+}
+if($Action -eq 'CardOpen'){
+ $cc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ClassNameProperty,'card-item')
+ $hits=@();$seen=[Collections.Generic.HashSet[string]]::new()
+ foreach($doc in $docs){
+  if($doc.url -like '*c-resume*'){continue}
+  foreach($card in $doc.element.FindAll([System.Windows.Automation.TreeScope]::Descendants,$cc)){
+   $rid=$card.GetRuntimeId() -join ','
+   if($rid -ne $CardRuntime -or $card.Current.IsOffscreen -or !$seen.Add($rid)){continue}
+   $open=Invoker $card
+   if($open){$hits+=@{target=(Target $open $doc.url)}}
+  }
+ }
+ if($hits.Count -eq 1){@{state='found';match=$hits[0]}|ConvertTo-Json -Depth 6 -Compress}else{@{state='unavailable';count=$hits.Count}|ConvertTo-Json -Compress}
+ exit
 }
 if($Action -eq 'Select'){
  $skip=@();if($SkipFile -and (Test-Path -LiteralPath $SkipFile)){$skip=@(Get-Content -LiteralPath $SkipFile -Raw|ConvertFrom-Json)}

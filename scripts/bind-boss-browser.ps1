@@ -1,10 +1,10 @@
-param([Parameter(Mandatory=$true)][long]$WindowHandle,[Parameter(Mandatory=$true)][string]$ChatTitle,[Parameter(Mandatory=$true)][string]$TabId,[Parameter(Mandatory=$true)][string]$OutputFile)
+param([Parameter(Mandatory=$true)][long]$WindowHandle,[Parameter(Mandatory=$true)][string]$ChatTitle,[string]$TabId,[Parameter(Mandatory=$true)][string]$OutputFile)
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 $root=[System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$WindowHandle)
 $process=Get-Process -Id $root.Current.ProcessId
-if($process.ProcessName -ne 'Codex'){throw 'external_browser_window_forbidden'}
+if($process.ProcessName -notin @('Codex','ChatGPT')){throw 'external_browser_window_forbidden'}
 $dc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Document)
 $docs=@($root.FindAll([System.Windows.Automation.TreeScope]::Descendants,$dc))
 $chats=@($docs|Where-Object {$v=$null;!$_.Current.IsOffscreen -and $_.Current.Name -eq $ChatTitle -and $_.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern,[ref]$v) -and $v.Current.Value -like 'app://*/index.html*'})

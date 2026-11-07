@@ -6,6 +6,7 @@ param(
 
 # Read-only, directed UIA. Caller first verifies/selects the visible coworker tab.
 # No CUA, DOM, page scripts, clipboard, navigation, clicking or scrolling here.
+$OutputEncoding=[Text.UTF8Encoding]::new($false);[Console]::OutputEncoding=$OutputEncoding
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName UIAutomationClient

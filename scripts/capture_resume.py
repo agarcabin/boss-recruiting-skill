@@ -69,6 +69,9 @@ def _capture(db, run_id, candidate_id, hwnd, output_dir, execute=None):
         raise ValueError('ocr_not_complete_no_assessment')
     if json.loads(detail.read_text(encoding='utf-8-sig')).get('state') != 'ok':
         raise ValueError('ocr_evidence_not_ok')
+    ocr_body=text.read_text(encoding='utf-8-sig')
+    if any(marker in ocr_body for marker in ('该牛人近期受同行BOSS欢迎','热搜牛人','相关推荐')):
+        raise ValueError('resume_capture_occluded_by_recommendations')
     return {'state': 'ready_for_assessment', 'run_id': run_id, 'candidate_id': candidate_id,
             'generation': generation, 'resume_evidence': {'image': str(image), 'ocr_text': str(text), 'ocr_json': str(detail)}}
 

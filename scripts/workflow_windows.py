@@ -15,10 +15,10 @@ class WindowsAdapter:
 
     def ps(self,name,*args):
         command=powershell_host.command(Path(__file__).with_name(name),*args)
-        done=subprocess.run(command,capture_output=True,text=True,encoding='utf-8-sig',timeout=15,**hidden_options())
+        done=subprocess.run(command,capture_output=True,text=True,encoding='utf-8-sig',errors='replace',timeout=15,**hidden_options())
         if done.returncode and name=='workflow-uia.ps1' and 'boss_document_unavailable' in done.stderr:
             time.sleep(.2)
-            done=subprocess.run(command,capture_output=True,text=True,encoding='utf-8-sig',timeout=15,**hidden_options())
+            done=subprocess.run(command,capture_output=True,text=True,encoding='utf-8-sig',errors='replace',timeout=15,**hidden_options())
         if done.returncode:raise RuntimeError(done.stderr[-1800:])
         return json.loads(done.stdout)
 
@@ -39,7 +39,16 @@ class WindowsAdapter:
             return safe_action.dispatch(self.db,self.run,None,command)
         finally:path.unlink(missing_ok=True)
 
+    def dismiss_related(self):
+        for attempt in range(2):
+            popup=self.query('RelatedClose')
+            if popup.get('state')!='found':return
+            self.invoke(popup['match']['target']);time.sleep(.2)
+        if self.query('RelatedClose').get('state')=='found':
+            raise ValueError('related_recommendations_popup_not_closed')
+
     def select(self,processed):
+        self.dismiss_related()
         self.processed=processed
         if not getattr(self,'page_job_recorded',False):
             observed=self.query('PageJob')
@@ -61,13 +70,19 @@ class WindowsAdapter:
     def open(self,candidate,mode):
         self.hwnd=candidate.get('hwnd',self.hwnd)
         if mode in ('resume','worker_resume'):
-            if not candidate.get('already_open'):
-                if not candidate.get('open_target'):raise ValueError('resume_open_control_not_available')
-                self.invoke(candidate['open_target'])
-            self.detail_open=True
-            for attempt in range(5):
-                if self.query('ResumePresence').get('document_target'):return
-                time.sleep(.2)
+            self.dismiss_related()
+            for opening in range(2):
+                if opening:
+                    fresh=self.query('CardOpen',candidate)
+                    if fresh.get('state')!='found':break
+                    candidate=dict(candidate,open_target=fresh['match']['target'],already_open=False)
+                if not candidate.get('already_open'):
+                    if not candidate.get('open_target'):raise ValueError('resume_open_control_not_available')
+                    self.invoke(candidate['open_target'])
+                self.detail_open=True
+                for attempt in range(5):
+                    if self.query('ResumePresence').get('document_target'):return
+                    time.sleep(.2)
             raise ValueError('resume_not_opened')
 
     def colleague(self,candidate,mode):
@@ -111,11 +126,12 @@ class WindowsAdapter:
         if mode=='card':
             observation,path,image=self.observations[candidate['candidate_id']]
             return dict(card=observation['card'],card_evidence=dict(image=str(image),uia_json=str(path)))
+        self.dismiss_related()
         rules=recruiting_rules.run_rules(ledger.run_row(self.db,self.run))
         data=None;warning=None
         for attempt in range(2):
             try:
-                data=self.query('ResumeFull' if mode=='worker_resume' or recruiting_rules.is_domain(rules) else 'Resume');break
+                data=self.query('ResumeFull' if rules.get('list_prefilter') or mode=='worker_resume' or recruiting_rules.is_domain(rules) else 'Resume');break
             except (RuntimeError,subprocess.TimeoutExpired) as exc:
                 # Origin/binding failures require rebind, never classify as a bad resume.
                 if any(code in str(exc) for code in ('codex_iab','external_browser','target_outside','boss_document_unavailable')):raise
@@ -123,19 +139,28 @@ class WindowsAdapter:
                 warning=str(exc)
                 if attempt==0:time.sleep(.2)
         if data is None:
-            self.query('ResumePresence') # Recheck origin after timeout; do not hide a lost binding.
-            return dict(keyword_text='',read_complete=False,read_warning=warning or '正文采集失败')
+            presence=self.query('ResumePresence') # Do not hide a lost binding.
+            if rules.get('list_prefilter') and self.allow_ocr and presence.get('document_target'):
+                data=dict(keyword_text='',resume_text='',overview_text='',read_complete=False)
+            else:
+                return dict(keyword_text='',read_complete=False,read_warning=warning or '正文采集失败')
         text=data.get('keyword_text','')
         result=dict(keyword_text=text,read_source=data.get('source','directed_resume_uia'),read_complete=data.get('read_complete',False))
-        if not recruiting_rules.is_domain(rules) and fast_assessment.evaluate(rules,result,recruiting_rules.positive_hits):
+        if warning:result['uia_read_warning']=warning
+        if not rules.get('list_prefilter') and not recruiting_rules.is_domain(rules) and fast_assessment.evaluate(rules,result,recruiting_rules.positive_hits):
             result['resume_save_note']='关键词直接通道使用UIA正文，未执行可选长图/OCR采集，因此没有简历图片文件。'
             return result
         # Overview text is useful for a direct rule, but does not prove that a
         # canvas-rendered resume body was read. Test body length independently.
         body=data.get('resume_text',text)
+        if '经历概览' in body and not any(section in body for section in ('工作经历','个人优势','教育经历','期望职位')):
+            result['read_complete']=False
         result['resume_save_note']=('本轮关闭了可选OCR（--no-ocr），未采集简历长图。' if not self.allow_ocr else
                                     '已通过UIA读取正文，本次未执行可选长图/OCR采集。')
-        if (len(body.strip())<80 or not result['read_complete'] and (recruiting_rules.is_domain(rules) or mode=='worker_resume')) and self.allow_ocr:
+        # New list-prefilter runs read the resume body through scrolling capture/OCR.
+        if (rules.get('list_prefilter') or len(body.strip())<80 or not result['read_complete'] and (recruiting_rules.is_domain(rules) or mode=='worker_resume')) and self.allow_ocr:
+            if rules.get('list_prefilter'):
+                result['read_complete']=False
             folder=self.folder/('resume-'+uuid.uuid4().hex)
             try:
                 captured=capture_resume.capture(self.db,self.run,candidate['candidate_id'],self.hwnd,folder)

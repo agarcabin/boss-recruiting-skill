@@ -32,7 +32,7 @@ def snapshot(profile: Path, fields: dict, greeting_mode: str | None = None) -> d
     rules.update(policy=policy, mode=mode, greeting_mode=greeting_mode,
                  namespace=fields.get('candidate_namespace') or metadata.get('candidate_namespace') or f"{fields['company']}-{fields['position']}",
                  pdf_required=fields.get('pdf_required', 'true').lower() != 'false',
-                 browser_target='codex_iab', short_view_wait=True)
+                 browser_target='codex_iab', short_view_wait=True, list_prefilter=True, ai_pros_cons=True)
     if policy == 'worker':
         rules['worker_policy_version'] = 2
         rules['worker_keywords'] = list(dict.fromkeys(rules.get('worker_keywords', rules.get('worker_advantage', []) + rules.get('worker_expectation', []))))
@@ -65,6 +65,11 @@ def evaluate(rules: dict, payload: dict, min_score: int) -> dict:
     import project_vault
     rules=project_vault.normalize(rules)
     payload=project_vault.normalize(payload)
+    if rules.get('list_prefilter') and payload.get('evaluation_stage') == 'list':
+        matched = list_match(rules, payload)
+        return dict(eligible=False, score=0, trigger='list_prefilter', hits=matched['hits'], requirements={})
+    if rules.get('list_prefilter') and rules.get('fulltext_groups') and payload.get('read_complete') is not True:
+        return dict(eligible=False,score=0,trigger='score_incomplete',hits=[],requirements={},scoring_complete=False)
     if is_domain(rules) and payload.get('read_complete') is False:
         return dict(eligible=False,score=0,trigger='score_incomplete',hits=[],requirements={},scoring_complete=False)
     if rules.get('mode')=='worker_resume':
@@ -208,6 +213,11 @@ def domain_group_score(rules,payload,min_score):
     clean=dict(rules,fulltext_groups=dict(cfg,a=groups['a'],b=groups['b']))
     result=group_policy.evaluate(clean,payload)
     if result is None: return None
+    if rules['policy']=='domain_unified' and rules.get('domain_legacy_checks') is False:
+        # The unified DOMAIN project uses only its approved grouped qualification.
+        # An explicit snapshot switch preserves historical and other policies.
+        result.update(requirements={},scoring_complete=True,scoring_rule_version=rules.get('version'))
+        return result
     statuses=payload.get('requirement_states',{})
     required=('brand_work','domain','independent','vendor','team','travel') if rules['policy']=='domain_advanced' else ('domain','vendor')
     hard=not any(statuses.get(k)=='failed' for k in required)
@@ -215,3 +225,18 @@ def domain_group_score(rules,payload,min_score):
     score=result['score']; by_score=score>=min_score
     result.update(eligible=hard and (keyword or by_score),trigger=('both' if keyword and by_score else 'keyword' if keyword else 'score') if hard and (keyword or by_score) else 'none',requirements={k:statuses.get(k,'unknown') for k in required},scoring_complete=True,scoring_rule_version=rules.get('version'))
     return result
+
+
+def list_match(rules, payload):
+    """Union of a job's vocabularies; a list hit never authorizes sending."""
+    import group_policy
+    config=rules.get('fulltext_groups') or {}
+    if rules.get('policy')=='worker':
+        words=rules.get('worker_keywords',rules.get('worker_advantage',[])+rules.get('worker_expectation',[]))
+    else:
+        words=config.get('a',[])+config.get('b',[])
+    words=list(dict.fromkeys(words))
+    card=payload.get('card') or {}
+    text=payload.get('raw_text') or card.get('readable_text') or ''
+    found=group_policy.hits(text,words,'list',config.get('ascii_boundary',False))
+    return dict(configured=bool(words), readable=bool(text.strip()), eligible=bool(found), hits=found)

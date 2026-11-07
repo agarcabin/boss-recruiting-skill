@@ -205,7 +205,7 @@ def list_projects(root: Path = PROJECTS_ROOT) -> list[dict[str, object]]:
 
 
 def sort_projects(projects):
-    """Company first-added time desc; explicit rank resolves missing/tied dates."""
+    """Explicit company order first; later companies follow oldest-first."""
     metadata = {}
     companies = {}
     for item in projects:
@@ -222,17 +222,15 @@ def sort_projects(projects):
         if value.get('company_display_order') is not None:
             group['ranks'].append(int(value['company_display_order']))
 
-    manual_all = (any(not group['times'] for group in companies.values())
-                  and all(group['ranks'] for group in companies.values()))
-
     def key(item):
         company = str(item['company'])
         group = companies[company]
         # Adding another job must not move an already established company.
         added = min(group['times']) if group['times'] else None
-        rank = min(group['ranks']) if group['ranks'] else 999
         value = metadata[str(item['metadata'])]
-        return ((rank if manual_all else added is None), (0 if manual_all else -(added or 0)), rank, company.casefold(),
+        company_key=((0,min(group['ranks']),0,0) if group['ranks'] else
+                     (1,0,added is None,added or 0))
+        return (*company_key,company.casefold(),
                 int(value.get('display_order', 999)), str(item['position']).casefold())
 
     return sorted(projects, key=key)
@@ -253,9 +251,9 @@ def company_order_status(projects):
                 group.append(stamp.timestamp())
         except (ValueError, TypeError):
             pass
-    return dict(rule='company_first_added_desc',
+    return dict(rule='explicit_company_order_then_first_added_asc',
                 missing_added_at=[company for company, stamps in times.items() if not stamps],
-                requires_manual_order=any(not stamps for stamps in times.values()) and len(manual)!=len(times),
+                requires_manual_order=any(not stamps and company not in manual for company,stamps in times.items()),
                 manual_order_field='company_display_order')
 
 

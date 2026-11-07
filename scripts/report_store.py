@@ -179,7 +179,13 @@ def daily_summary(db, profile, stamp, rows, at=None):
             unavailable = True
         else:
             elapsed += max(0, int((right-left).total_seconds())-paused)
-    return dict(viewed=len(viewed), sent=sum(r['actual_send_status']=='sent' for r in rows),
+    import daily_metrics
+    counts=daily_metrics.overlay_counts(db,profile,stamp,rows)
+    outcomes=daily_metrics.rejection_counts(rows)
+    denominator=counts['resume_viewed']
+    rate=(outcomes['coworker_skipped']/denominator
+          if denominator and outcomes['coworker_skipped']<=denominator else None)
+    return dict(viewed=len(viewed),**counts,**outcomes,coworker_skip_rate=rate,
                 elapsed_seconds=None if unavailable else elapsed, **identity)
 
 
@@ -191,18 +197,22 @@ def add_summary_header(ws, db, profile, stamp, rows, at=None):
     seconds = metrics['elapsed_seconds']
     duration = (f'{seconds//3600} 小时 {seconds%3600//60} 分钟 {seconds%60} 秒'
                 if seconds is not None else '暂无（跨日暂停记录不足）')
-    speed = (f"{seconds/metrics['viewed']:.2f} 秒/人"
-             if seconds is not None and metrics['viewed'] else '暂无')
+    speed = (f"{seconds/metrics['judged']:.2f} 秒/人"
+             if seconds is not None and metrics['judged'] else '暂无')
     version = skill_update.installed_version(Path(__file__).resolve().parents[1])
     ws.insert_rows(1, 1)
     for cells in ws.iter_rows(min_row=2):
         for cell in cells:
             if cell.hyperlink:
                 cell.hyperlink.ref = cell.coordinate
-    texts = [f"目标岗位：{metrics['company']} {metrics['position']}",
-             f"共查看 {metrics['viewed']} 人，打招呼了 {metrics['sent']} 人",
-             f'总用时 {duration}，平均速度 {speed}',
-             f"载体版本：v{version}，更新日期：{current.astimezone(ZONE):%Y-%m-%d %H:%M:%S}"]
+    rate=metrics['coworker_skip_rate']
+    probability=f'{rate:.2%}' if rate is not None else '暂无'
+    texts = [f"目标企业及岗位：{metrics['company']} {metrics['position']}",
+             f"共判断 {metrics['judged']} 人",f"共查看 {metrics['resume_viewed']} 人",
+             f"成功招呼 {metrics['sent']} 人",f"简历不合格 {metrics['resume_rejected']} 人",
+             f"同事跳过 {metrics['coworker_skipped']} 人",f'同事跳过概率 {probability}',
+             f'总用时 {duration}',f'平均速度 {speed}',
+             f"skill版本：v{version}",f"更新时间：{current.astimezone(ZONE):%Y-%m-%d %H:%M:%S}"]
     ws.merge_cells(start_row=1,start_column=1,end_row=1,end_column=ws.max_column)
     cell=ws.cell(1,1,' ｜ '.join(texts))
     cell.alignment=Alignment(vertical='center',wrap_text=False,shrink_to_fit=True)

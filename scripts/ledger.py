@@ -592,7 +592,8 @@ def assessment_eligible(run, assessment):
     result = recruiting_rules.from_assessment(assessment)
     if "evaluation_input" in assessment.keys() and assessment["evaluation_input"]:
         result = recruiting_rules.evaluate(rules,json.loads(assessment["evaluation_input"]),run["min_score"])
-    if rules.get("policy","legacy") != "legacy":
+    grouped_threshold=(rules.get("fulltext_groups") or {}).get("scoring")=="keyword_threshold"
+    if rules.get("policy","legacy") != "legacy" or (grouped_threshold and result.get("method")=="direct_rule"):
         return bool(result.get("eligible"))
     return assessment["overall_score"] >= run["min_score"] and (assessment["hard_requirements"] == "true" or assessment["hard_requirement_override"] == "true")
 

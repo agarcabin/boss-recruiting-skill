@@ -14,7 +14,7 @@ python scripts/launch_progress.py --run <run_id>
 python scripts/workflow_runner.py --run <run_id> --hwnd <窗口句柄> --launch
 python scripts/workflow_runner.py --run <run_id> --status
 
-可省略hwnd，由定向UIA寻找唯一窗口；--no-ocr关闭可选OCR。一个运行一个主执行器。常规顺序：定位→真正打开并登记查看→同事检查→读取→项目策略→发送核验→收藏→计时收尾→刷新日表→下一位。不用单步命令重复执行主循环已经完成的动作。
+可省略hwnd，由定向UIA寻找唯一窗口；新运行默认通过滚动截图、拼接长图和本地OCR读取电子简历正文，正常启动不传--no-ocr，仅用户明确关闭时使用。一个运行一个主执行器。常规顺序：定位→真正打开并登记查看→同事检查→读取→项目策略→发送核验→收藏→计时收尾→刷新日表→下一位。不用单步命令重复执行主循环已经完成的动作。
 
 ## 同事、评估与发送
 
