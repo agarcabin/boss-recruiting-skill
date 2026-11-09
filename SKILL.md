@@ -2,13 +2,17 @@
 name: boss-recruiting
 description: 本地项目管理、简历或卡片评估、受控招呼与唯一日报；项目数据加密。
 metadata:
-  version: "1.4.6"
-  updated_at: "2026-11-07"
+  version: "1.4.7"
+  updated_at: "2026-11-09"
 ---
 
 # 杰博人力创新招聘组自动打招呼 Skill
 
 首次安装先运行scripts/bootstrap.ps1配置环境并验证发布签名。低于1.3.0的已安装版本首次升级到1.3.0时自动保存本机当前Windows用户的项目解锁信任，无需旧版本下载或密码。首次安装1.3.0不自动解锁；已有项目中显示“创新招聘组项目（已加密）”，选中后执行scripts/project_registry.py unlock --prompt。密码正确才解密并保存DPAPI本机信任；错误显示“密码错误，项目未解密。”，不解密也不保存信任；取消保持加密。仍可创建自用项目。已有信任保留。项目数据不从公开文档恢复。首次升级的可信入口应从官方GitHub HTTPS获取，不能使用未验证镜像内脚本作为信任根。
+
+## 1.4.7 共享项目发布
+
+本轮将本机现有13家企业、29个可用岗位纳入共享加密包，包含转为共享的9个自建岗位；保留既有归档配置、企业顺序、岗位ID、词库和审核条件。候选资料、账本及凭据不上传。执行规则沿用1.4.6及本轮快照，发布口径见references/v1.4.7-policy.md。
 
 ## 1.4.6 强制执行规则
 
@@ -78,4 +82,4 @@ BOSS仅使用包内定向Win32 UIA，遵循references/ui-automation.md、click-m
 
 每个岗位每个上海自然日只有一份Excel；同日多run合并，跨天分表，结束更新原表，不创建最终副本。路径归属持久登记，改output-root不另造表。占用保留账本及待补写状态；摘要分别显示优点、缺点及命中词，原始证据保留隐藏页。中间文件在LOCALAPPDATA/Codex/recruiting-greetings/workflow，候选数据、账本与凭据仅本地。
 
-活动运行或未完成安装恢复存在时不得安装新版本；岗位更新、退休及run创建共用数据库准入边界，旧快照不改写。版本按用户指定发布；本次为1.4.6。实际运行按references/control-policy.md及continuous-workflow.md；更新发布按references/github-updates.md。
+活动运行或未完成安装恢复存在时不得安装新版本；岗位更新、退休及run创建共用数据库准入边界，旧快照不改写。版本按用户指定发布；本次为1.4.7。实际运行按references/control-policy.md及continuous-workflow.md；更新发布按references/github-updates.md。

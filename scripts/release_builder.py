@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
-VERSION='1.4.5'
+VERSION='1.4.7'
 def issuer_path():return project_vault.state_dir()/'publisher'/'issuer.dpapi'
 def issuer():
     if not issuer_path().is_file():raise ValueError('publisher_key_missing_restore_before_build')
@@ -176,7 +176,8 @@ def build(root,output,public_root,legacy_dir=None,include_user_projects=False):
     public_root.mkdir(parents=True,exist_ok=True)
     installed_manifest=root/'release-manifest.json'
     allowed=set(json.loads(installed_manifest.read_text(encoding='utf-8'))['files']) if project_vault.vault_path(root).is_file() and installed_manifest.is_file() else None
-    if allowed is not None:allowed.add('references/v'+version+'-policy.md')
+    if allowed is not None:
+        allowed.update(path.relative_to(root).as_posix() for path in (root/'references').glob('v*-policy.md'))
     for name in ('scripts','references','agents'):
         for path in (root/name).rglob('*'):
             if not path.is_file() or path.suffix not in ('.py','.ps1','.md','.json','.yaml','.yml','.txt') or '__pycache__' in path.parts:continue
