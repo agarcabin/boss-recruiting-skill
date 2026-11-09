@@ -145,6 +145,13 @@ def score_source(payload: dict, key: str, enabled: bool) -> tuple[int | None, st
 
 
 def validate(payload: dict, rules=None) -> dict:
+    if (rules or {}).get('worker_deduction_version') and payload.get('read_complete') is True and payload.get('worker_stage') == 'resume':
+        import recruiting_rules
+        result = recruiting_rules.worker_match(rules, payload)
+        note = recruiting_rules.worker_penalty_note(result)
+        if note and note not in payload.get('cons', ''):
+            payload['cons'] = payload.get('cons', '') + '；' + note
+
     for key in ("candidate_id", "candidate_name", "started_at", "pros", "cons", "decision", "overall_score", "hard_requirements", "electronic_resume_enabled"):
         if key not in payload:
             raise ValueError(f"missing {key}")

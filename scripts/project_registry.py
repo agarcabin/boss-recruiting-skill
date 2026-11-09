@@ -94,6 +94,8 @@ def build_home_menu(projects, latest_run, metadata=None, locked_entry=None):
         state=states.get(latest_run.get('run_state'),'状态未知')
         company=latest_run.get('company') or '企业未知'
         position=latest_run.get('position') or '岗位未知'
+        project=next((p for p in projects if str(p.get('profile'))==str(latest_run.get('profile_path'))),None)
+        if project:position=project.get('position_display',position)
         sent=latest_run.get('greetings_sent')
         progress=f'成功招呼 {sent} 人' if sent is not None else '成功招呼人数未知'
         last=f'{company}｜{position}；{state}，{progress}'
@@ -160,10 +162,14 @@ def read_project(profile: Path) -> dict[str, object]:
     greeting_mode = fields.get('greeting_mode', metadata.get('greeting_mode', 'single'))
     if greeting_mode not in ('single', 'triple'):
         raise ValueError('invalid_greeting_mode')
+    import project_source
+    provenance = project_source.classify(profile, metadata)
+    position_display = project_source.display(position, provenance)
     return {"project_id": project_id, "company": company, "position": position,
+            "position_display": position_display, "provenance": provenance,
             "greeting_mode": greeting_mode,
             "approval": fields.get("approval", "pending"), "profile": str(profile),
-            "metadata": str(metadata_path), "display_name": f"{company} - {position}"}
+            "metadata": str(metadata_path), "display_name": f"{company} - {position_display}"}
 
 
 def register_project(profile: Path, project_id: str = "") -> dict[str, object]:
@@ -179,11 +185,13 @@ def register_project(profile: Path, project_id: str = "") -> dict[str, object]:
     requested_id = project_id.strip() or str(existing.get("project_id", ""))
     digest = normalized_project_id(requested_id, str(project["company"]), str(project["position"]))
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    metadata = {**{key:existing[key] for key in ("candidate_namespace","evaluation_mode","trigger_policy","display_order","company_added_at","company_display_order","origin","active","retired","rules") if key in existing}, "format": PACKAGE_FORMAT, "project_id": digest,
+    metadata = {**{key:existing[key] for key in ("candidate_namespace","evaluation_mode","trigger_policy","display_order","company_added_at","company_display_order","origin","provenance","active","retired","rules") if key in existing}, "format": PACKAGE_FORMAT, "project_id": digest,
                 "company": project["company"], "position": project["position"], "greeting_mode": project["greeting_mode"],
                 "profile_schema": "boss-greeting-profile/v1", "profile": profile.name,
                 "created_at": existing.get("created_at", stamp), "updated_at": stamp}
     metadata.setdefault('origin','user')
+    if project['provenance']['kind'] == 'local':
+        metadata.update(origin='user', provenance=project['provenance'])
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     project.update(project_id=digest, metadata=str(metadata_path))
     return project
@@ -268,7 +276,9 @@ def export_project(profile: Path, destination: Path) -> dict[str, object]:
     destination.parent.mkdir(parents=True, exist_ok=True)
     profile_bytes = profile.read_bytes()
     metadata_path = Path(str(project["metadata"]))
-    metadata_bytes = metadata_path.read_bytes()
+    import project_source
+    exported_metadata = project_source.copy_provenance(json.loads(metadata_path.read_text(encoding='utf-8-sig')))
+    metadata_bytes = json.dumps(exported_metadata, ensure_ascii=False, indent=2).encode('utf-8')
     names = {"project.json": metadata_bytes, profile.name: profile_bytes}
     manifest = {"format": MANIFEST_FORMAT, "package_schema": PACKAGE_FORMAT,
                 "project_id": project["project_id"], "company": project["company"],
@@ -333,6 +343,9 @@ def import_project(archive_path: Path, root: Path = PROJECTS_ROOT, overwrite: bo
     markdown = [name for name in contents if name.lower().endswith(".md")]
     if len(markdown) != 1:
         raise ValueError("archive_profile_count_invalid")
+    import project_source
+    portable = project_source.copy_provenance(json.loads(contents['project.json'].decode('utf-8-sig')))
+    contents['project.json'] = json.dumps(portable, ensure_ascii=False, indent=2).encode('utf-8')
     profile_bytes = contents[markdown[0]]
     with tempfile.TemporaryDirectory(prefix=".import-", dir=root if root.exists() else None) as temp:
         temporary = Path(temp)

@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
-VERSION='1.4.8'
+VERSION='1.4.9'
 def issuer_path():return project_vault.state_dir()/'publisher'/'issuer.dpapi'
 def issuer():
     if not issuer_path().is_file():raise ValueError('publisher_key_missing_restore_before_build')
@@ -38,14 +38,19 @@ def collect(root,include_user_projects=False):
     else:
         rules=json.loads((root/'references/recruiting-rules.json').read_text(encoding='utf-8-sig'))
         payload={};known=None
-    files={};project_names=set()
+    files=dict(payload.get('files',{})) if known is not None and not include_user_projects else {};project_names=set()
     for path in (root/'profiles').rglob('*'):
         if not path.is_file() or path.suffix not in ('.md','.json'):continue
         name=path.relative_to(root).as_posix()
         metadata=path if path.name=='project.json' else path.parent/'project.json'
         if metadata.is_file():
             item=json.loads(metadata.read_text(encoding='utf-8-sig'))
-            if item.get('origin')=='user' and not include_user_projects:continue
+            if not include_user_projects:
+                import project_source
+                profile=path.parent/item.get('profile','profile.md')
+                if not profile.is_file():
+                    profile=next(path.parent.glob('*.md'), profile)
+                if item.get('origin')=='user' or project_source.classify(profile,item,project_vault.safe_files(payload) if known is not None else {},root)['kind']=='local':continue
             if item.get('company'):project_names.add(item['company'])
         elif known is not None and name not in known:continue
         files[name]=crypto.b64(path.read_bytes())
@@ -178,10 +183,12 @@ def build(root,output,public_root,legacy_dir=None,include_user_projects=False):
     allowed=set(json.loads(installed_manifest.read_text(encoding='utf-8'))['files']) if project_vault.vault_path(root).is_file() and installed_manifest.is_file() else None
     if allowed is not None:
         allowed.update(path.relative_to(root).as_posix() for path in (root/'references').glob('v*-policy.md'))
+        allowed.add('scripts/project_source.py')
+        allowed.add('scripts/test_release149.py')
     for name in ('scripts','references','agents'):
         for path in (root/name).rglob('*'):
             if not path.is_file() or path.suffix not in ('.py','.ps1','.md','.json','.yaml','.yml','.txt') or '__pycache__' in path.parts:continue
-            if path.name.startswith('test_') and path.name!='test_core_contract.py':continue
+            if path.name.startswith('test_') and path.name not in ('test_core_contract.py','test_release149.py'):continue
             if path.name in ('resume-extraction-test-results.md','resume-extraction-test-plan.md','uia-resume-diagnostic-report.md'):continue
             if name=='references' and path.name in ('recruiting-rules.json','project-vault.json','publisher-key.json'):continue
             relative=path.relative_to(root).as_posix()

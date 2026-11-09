@@ -205,6 +205,7 @@ class Runner:
                 else:return self.handoff('card_visual',observation)
             result=candidate_checks.record(self.db,self.run,cid,observation,'card' if mode=='card' else 'resume')
             self.data['coworker']=observation
+            self.data['coworker_result']=result
             if not result['may_continue']:
                 evidence=self.adapter.skip_evidence(candidate,mode) if hasattr(self.adapter,'skip_evidence') else {}
                 payload=dict(decision='skip' if result.get('skip') else 'review',overall_score=0,
@@ -229,7 +230,7 @@ class Runner:
                 payload=dict(facts,**answer)
             elif mode=='worker_resume':
                 result=recruiting_rules.worker_match(rules,facts)
-                payload=dict(facts,decision='greet' if result['eligible'] else 'skip',overall_score=result['score'],electronic_resume_enabled=True,hard_requirements=False,electronic=dict(score=result['score'],evidence='电子简历全文关键词判断'),pros='命中普工关键词' if result['eligible'] else '电子简历全文未命中关键词',cons='未读取字段保持未知')
+                payload=dict(facts,decision='greet' if result['eligible'] else 'skip',overall_score=result['score'],electronic_resume_enabled=True,hard_requirements=False,electronic=dict(score=result['score'],evidence='电子简历全文关键词判断'),pros='命中普工关键词' if result['hits'] else '电子简历全文未命中关键词',cons='未读取字段保持未知')
             elif mode=='card':
                 result=recruiting_rules.evaluate(rules,facts,run['min_score'])
                 payload=dict(facts,decision='greet' if result['eligible'] else 'skip',overall_score=result['score'],
@@ -335,7 +336,7 @@ class Runner:
             clock_key='resume_started_active' if worker_v2 else 'visit_started_active'
             elapsed=max(0,short_view_wait.active_clock(self.db,self.run)-self.data.get(clock_key,0)-self.data.get('excluded_wait_seconds',0))
             list_only=bool(recruiting_rules.run_rules(run).get('list_prefilter') and self.data.get('facts',{}).get('evaluation_stage')=='list' and self.phase=='next' and self.data.get('decision') in ('skip','review') and not self.data.get('coworker'))
-            wait=(dict(state='ready',retry_after_seconds=0,seconds=0) if list_only or (worker_v2 and self.data.get(clock_key) is None)
+            wait=(dict(state='ready',retry_after_seconds=0,seconds=0) if short_view_wait.coworker_exempt(recruiting_rules.run_rules(run), self.data.get('coworker_result'), self.data.get('decision')) or list_only or (worker_v2 and self.data.get(clock_key) is None)
                   else short_view_wait.plan(self.db,self.run,self.data['visit_hash'],elapsed))
             self.data['short_view_wait']=wait
             quota=greeting_rate.status(self.db)

@@ -32,9 +32,10 @@ def snapshot(profile: Path, fields: dict, greeting_mode: str | None = None) -> d
     rules.update(policy=policy, mode=mode, greeting_mode=greeting_mode,
                  namespace=fields.get('candidate_namespace') or metadata.get('candidate_namespace') or f"{fields['company']}-{fields['position']}",
                  pdf_required=fields.get('pdf_required', 'true').lower() != 'false',
-                 browser_target='codex_iab', short_view_wait=True, list_prefilter=True, ai_pros_cons=True)
+                 browser_target='codex_iab', short_view_wait=True, list_prefilter=True, ai_pros_cons=True, coworker_skip_wait_exempt=True)
     if policy == 'worker':
         rules['worker_policy_version'] = 2
+        rules.update(worker_deduction_version=1, worker_negative_keywords=['服务员','厨师','前台','传菜','销售','经理','主管'], worker_negative_points=10, worker_min_score=60)
         rules['worker_keywords'] = list(dict.fromkeys(rules.get('worker_keywords', rules.get('worker_advantage', []) + rules.get('worker_expectation', []))))
     return rules
 
@@ -172,6 +173,11 @@ def from_assessment(row) -> dict:
     return json.loads(row['eligibility_json'] or '{}') if 'eligibility_json' in row.keys() else {}
 
 
+def worker_penalty_note(result):
+    hits = result.get('negative_hits', [])
+    return ('减分词：' + '、'.join(h['word'] for h in hits) + '；扣' + str(result['keyword_penalty']) + '分') if hits else ''
+
+
 def worker_v2(rules):
     return rules.get('mode') == 'worker_resume' and rules.get('worker_policy_version') == 2
 
@@ -186,8 +192,16 @@ def worker_match(rules, payload):
         words = list(dict.fromkeys(rules.get('worker_keywords', rules.get('worker_advantage', []) + rules.get('worker_expectation', []))))
         hits = positive_hits(text, words)
         found = list({h['word']: dict(h, field='card' if stage == 'list' else 'resume') for h in hits}.values())
-        return dict(eligible=bool(found), score=min(100, 60 + 2 * (len(found) - 1)) if found else 0,
-                    trigger='keyword' if found else 'none', hits=found, requirements={})
+        base = min(100, 60 + 2 * (len(found) - 1)) if found else 0
+        negative = []
+        if stage != 'list' and rules.get('worker_deduction_version') == 1:
+            negative = list({h['word']: dict(h, field='resume') for h in positive_hits(text, rules.get('worker_negative_keywords', []))}.values())
+        deduction = len(negative) * rules.get('worker_negative_points', 10)
+        score = max(0, base - deduction)
+        eligible = bool(found) and (stage == 'list' or not rules.get('worker_deduction_version') or score >= rules.get('worker_min_score', 60))
+        return dict(eligible=eligible, score=score, score_before_penalties=base,
+                    keyword_penalty=deduction, negative_hits=negative,
+                    trigger='keyword' if eligible else 'worker_score_below_minimum' if found else 'none', hits=found, requirements={})
     stage=payload.get('worker_stage','resume')
     card=payload.get('card',{})
     text=payload.get('keyword_text','')

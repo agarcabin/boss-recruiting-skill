@@ -50,7 +50,7 @@ def parse(prompt,projects,at=None):
         # “打ExampleEntity6250人” is an explicit greeting target, not a view count.
         greeting=re.search(r'(?:打|招呼)'+r'(?:ExampleEntity62|'+re.escape(str(project['company']))+r'|'+re.escape(str(project['position']))+r')(\d+)(?:人|个|位)',text)
     target,max_views=run_targets.resolve(int(greeting.group(1)) if greeting else None,int(viewing.group(1)) if viewing else None)
-    return dict(state='ready_to_start',startup_mode='direct',profile=project['profile'],company=project['company'],position=project['position'],
+    return dict(state='ready_to_start',startup_mode='direct',profile=project['profile'],company=project['company'],position=project['position'],position_display=project.get('position_display',project['position']),display_name=project.get('display_name'),provenance=project.get('provenance'),
                 target=target,max_views=max_views,chat_title=f"{project['company']} {project['position']} - {at.astimezone(timezone(timedelta(hours=8))).date().isoformat()}",
                 approval_warning=project.get('approval')!='approved',views_explicit=bool(viewing),greetings_explicit=bool(greeting),
                 next_actions=['set_current_chat_title','collapse_chat_sidebar','open_boss_in_codex','confirm_already_logged_in_prompt_if_present','start_direct_run'])

@@ -153,24 +153,15 @@ def safe_files(data):
     return result
 
 def preserve_user_projects(files,root,collision_error='private_project_user_collision'):
-    """A full snapshot may seed user projects; upgrades keep their local edits."""
-    root=Path(root).resolve();preserved=set()
+    import project_source
+    root=Path(root).resolve()
     for name in files:
         path=root/name
         if not path.resolve().is_relative_to(root):raise ValueError('private_path_escape')
         for parent in (path,*path.parents):
             if parent==root.parent:break
             if parent.is_symlink() or getattr(parent,'is_junction',lambda:False)():raise ValueError('private_local_link')
-        meta=path if path.name=='project.json' else path.parent/'project.json'
-        if not meta.is_file():continue
-        current=json.loads(meta.read_text(encoding='utf-8-sig'))
-        if current.get('origin')!='user':continue
-        incoming=files.get(meta.relative_to(root).as_posix())
-        snapshot=json.loads(incoming.decode('utf-8-sig')) if incoming else {}
-        if snapshot.get('origin')!='user' or not current.get('project_id') or current['project_id']!=snapshot.get('project_id'):
-            raise ValueError(collision_error)
-        preserved.add(meta.parent.relative_to(root).as_posix())
-    return {name:content for name,content in files.items() if str(PurePosixPath(name).parent) not in preserved}
+    return project_source.preserve(files,root,collision_error)
 
 
 def apply(data,root=None,backup=None,ticket=None):
@@ -187,9 +178,6 @@ def apply(data,root=None,backup=None,ticket=None):
                 if parent.is_symlink() or getattr(parent,'is_junction',lambda:False)():raise ValueError('private_local_link')
             # Never replace a self-created project with a bundled project.
             meta=path if path.name=='project.json' else path.parent/'project.json'
-            if meta.is_file():
-                current=json.loads(meta.read_text(encoding='utf-8-sig'))
-                if current.get('origin')=='user':raise ValueError('private_project_user_collision')
             old[name]=path.read_bytes() if path.is_file() else None
             if old[name] is not None:crypto.atomic(backup/name,old[name])
         record=dict(root=str(root.resolve()),database=str((state_dir()/'ledger.sqlite3').resolve()),files={name:dict(existed=value is not None,sha256=hashlib.sha256(value).hexdigest() if value is not None else None) for name,value in old.items()},new_runtime=False,state='prepared')

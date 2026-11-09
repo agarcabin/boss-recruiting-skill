@@ -22,6 +22,12 @@ def set_enabled(db,run,value):
         exists=db.execute("SELECT 1 FROM sqlite_master WHERE name='short_view_waits'").fetchone()
         if exists: db.execute('UPDATE short_view_waits SET cancelled=1 WHERE run_id=?',(run,))
 
+def coworker_exempt(rules, result, decision):
+    result = result or {}
+    return bool(rules.get('coworker_skip_wait_exempt') and decision == 'skip'
+                and result.get('skip') and result.get('reason') == 'coworker_within_or_exactly_7_days')
+
+
 def plan(db,run,visit,elapsed,at=None):
     at=at or ledger.now()
     db.execute('''CREATE TABLE IF NOT EXISTS short_view_waits(
