@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
-VERSION='1.4.11'
+VERSION='1.4.12'
 def issuer_path():return project_vault.state_dir()/'publisher'/'issuer.dpapi'
 def issuer():
     if not issuer_path().is_file():raise ValueError('publisher_key_missing_restore_before_build')
@@ -128,7 +128,7 @@ metadata:
 
 ## 运行控制
 
-默认成功招呼150人、查看300人；用户可指定更大的正整数，无固定时长或滚动24小时限制。所有岗位共用首条起300秒窗口，最多10人，满额等待本窗剩余时间；未知结果保守占位。继续使用统一预留/安全动作，不绕过限速。
+默认成功招呼150人、查看300人；用户可指定更大的正整数，无固定时长或滚动24小时限制。所有岗位共用首条起200秒窗口，最多5人，满额等待本窗剩余时间；未知结果保守占位。继续使用统一预留/安全动作，不绕过限速。
 
 电子简历打开后先读同事沟通记录：任意一条不超过7天则跳过，全部严格超过7天且完整读取才继续；明确无记录可继续，异常不得当作无记录。列表模式按当前卡片同事图标与项目规则处理。历史候选ID不作自动去重。
 

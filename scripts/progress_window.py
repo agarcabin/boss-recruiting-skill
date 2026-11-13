@@ -279,7 +279,7 @@ def snapshot(db: sqlite3.Connection, run_id: str, output_root=None) -> dict:
         if workflow and workflow['phase']=='send' and json.loads(workflow['payload']).get('rate_limit'):
             import greeting_rate
             rate=greeting_rate.status(db)
-            if rate['state']=='rate_limited':step=f"速度控制：等待{rate['retry_after_seconds']}秒后继续（10人/10分钟）"
+            if rate['state']=='rate_limited':step=f"速度控制：等待{rate['retry_after_seconds']}秒后继续（{greeting_rate.LIMIT}人/{greeting_rate.SECONDS}秒）"
     return {"state": state, "elapsed": f"{elapsed // 3600:02d}:{elapsed % 3600 // 60:02d}:{elapsed % 60:02d}",
             "current_step": step, "drain_reason":drain_reason,
             "current": active["ordinal"] if active else None, "started": progress["started"],

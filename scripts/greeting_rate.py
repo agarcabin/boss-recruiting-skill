@@ -1,11 +1,11 @@
-"""Shared, persistent 10-person/300-second greeting windows for every job."""
+"""Shared, persistent 5-person/200-second greeting windows for every job."""
 from contextlib import contextmanager
 from datetime import timedelta
 import math
 import json
 
-LIMIT = 10
-SECONDS = 300
+LIMIT = 5
+SECONDS = 200
 KEY = 'greeting_rate/v1'
 
 

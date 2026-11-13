@@ -64,15 +64,26 @@ class TimingTests(unittest.TestCase):
                     self.assertEqual(short_view_wait.plan(db, 'run', 'visit', 10, self.at+timedelta(seconds=30))['state'], 'ready')
                     draw.assert_not_called()
 
+    def test_five_slots_then_sixth_waits_until_200_seconds(self):
+        for i in range(5):
+            result = greeting_rate.claim(self.db, str(i), self.at)
+            self.assertEqual((result['state'], result['remaining']), ('ready', 4-i))
+        self.assertTrue(greeting_rate.claim(self.db, '0', self.at)['reused'])
+        blocked = greeting_rate.claim(self.db, 'sixth', self.at+timedelta(seconds=50))
+        self.assertEqual((blocked['state'], blocked['retry_after_seconds']), ('rate_limited', 150))
+        self.assertEqual(greeting_rate.status(self.db, self.at+timedelta(seconds=199.5))['retry_after_seconds'], 1)
+        result = greeting_rate.claim(self.db, 'sixth', self.at+timedelta(seconds=200))
+        self.assertEqual((result['used'], result['remaining']), (1, 4))
+
     def test_short_wait_and_quota_keep_independent_deadlines(self):
-        for i in range(10):
+        for i in range(5):
             greeting_rate.claim(self.db, str(i), self.at)
         later = self.at+timedelta(seconds=100)
         with patch.object(short_view_wait.random, 'randint', return_value=40):
             wait = short_view_wait.plan(self.db, 'run', 'visit', 10, later)
         self.assertEqual(wait['retry_after_seconds'], 30)
-        self.assertEqual(greeting_rate.status(self.db, later)['retry_after_seconds'], 200)
-        self.assertEqual(greeting_rate.status(self.db, self.at+timedelta(seconds=300))['state'], 'ready')
+        self.assertEqual(greeting_rate.status(self.db, later)['retry_after_seconds'], 100)
+        self.assertEqual(greeting_rate.status(self.db, self.at+timedelta(seconds=200))['state'], 'ready')
 
 
 if __name__ == '__main__':
