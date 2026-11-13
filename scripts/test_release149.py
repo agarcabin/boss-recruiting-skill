@@ -61,11 +61,11 @@ class Quota149Tests(unittest.TestCase):
                 db.commit()
             with contextlib.closing(sqlite3.connect(file)) as db:
                 db.row_factory=sqlite3.Row
-                self.assertEqual(greeting_rate.status(db,at+timedelta(seconds=499))['retry_after_seconds'],1)
-                self.assertEqual(greeting_rate.claim(db,'other-job',at+timedelta(seconds=499))['state'],'rate_limited')
-                self.assertEqual(greeting_rate.claim(db,'other-job',at+timedelta(seconds=500))['used'],1)
+                self.assertEqual(greeting_rate.status(db,at+timedelta(seconds=299))['retry_after_seconds'],1)
+                self.assertEqual(greeting_rate.claim(db,'other-job',at+timedelta(seconds=299))['state'],'rate_limited')
+                self.assertEqual(greeting_rate.claim(db,'other-job',at+timedelta(seconds=300))['used'],1)
                 db.execute('UPDATE settings SET value=? WHERE key=?',(json.dumps(dict(started_at=at.isoformat(),used=10)),greeting_rate.KEY))
-                self.assertEqual(greeting_rate.status(db,at+timedelta(seconds=450))['retry_after_seconds'],50)
+                self.assertEqual(greeting_rate.status(db,at+timedelta(seconds=250))['retry_after_seconds'],50)
 
     def test_only_recent_coworker_skip_is_exempt(self):
         result=dict(skip=True,reason='coworker_within_or_exactly_7_days')

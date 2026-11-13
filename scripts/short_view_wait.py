@@ -1,4 +1,4 @@
-"""One durable random cooldown per visit, independent of shared greeting quota."""
+"""Durable per-visit top-up to a random total duration, independent of quota."""
 import json,math,random
 from datetime import timedelta
 import ledger
@@ -35,7 +35,8 @@ def plan(db,run,visit,elapsed,at=None):
         deadline TEXT NOT NULL,cancelled INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(run_id,visit))''')
     row=db.execute('SELECT * FROM short_view_waits WHERE run_id=? AND visit=?',(run,visit)).fetchone()
     if not row:
-        seconds=random.randint(20,40) if enabled(db,run) and elapsed<30 else 0
+        # Pick a target total, not an additional 20-40 seconds of waiting.
+        seconds=max(0,random.randint(20,40)-max(0,elapsed)) if enabled(db,run) and elapsed<30 else 0
         db.execute('INSERT OR IGNORE INTO short_view_waits VALUES (?,?,?,?,0)',(run,visit,seconds,(at+timedelta(seconds=seconds)).isoformat()))
         row=db.execute('SELECT * FROM short_view_waits WHERE run_id=? AND visit=?',(run,visit)).fetchone()
     left=max(0,math.ceil((ledger.parse_time(row['deadline'])-at).total_seconds())) if enabled(db,run) and not row['cancelled'] else 0

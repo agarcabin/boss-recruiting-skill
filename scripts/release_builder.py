@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
-VERSION='1.4.9'
+VERSION='1.4.11'
 def issuer_path():return project_vault.state_dir()/'publisher'/'issuer.dpapi'
 def issuer():
     if not issuer_path().is_file():raise ValueError('publisher_key_missing_restore_before_build')
@@ -185,10 +185,11 @@ def build(root,output,public_root,legacy_dir=None,include_user_projects=False):
         allowed.update(path.relative_to(root).as_posix() for path in (root/'references').glob('v*-policy.md'))
         allowed.add('scripts/project_source.py')
         allowed.add('scripts/test_release149.py')
+        allowed.update(('references/timing-policy.md', 'scripts/test_timing_policy.py'))
     for name in ('scripts','references','agents'):
         for path in (root/name).rglob('*'):
             if not path.is_file() or path.suffix not in ('.py','.ps1','.md','.json','.yaml','.yml','.txt') or '__pycache__' in path.parts:continue
-            if path.name.startswith('test_') and path.name not in ('test_core_contract.py','test_release149.py'):continue
+            if path.name.startswith('test_') and path.name not in ('test_core_contract.py','test_release149.py','test_timing_policy.py'):continue
             if path.name in ('resume-extraction-test-results.md','resume-extraction-test-plan.md','uia-resume-diagnostic-report.md'):continue
             if name=='references' and path.name in ('recruiting-rules.json','project-vault.json','publisher-key.json'):continue
             relative=path.relative_to(root).as_posix()
