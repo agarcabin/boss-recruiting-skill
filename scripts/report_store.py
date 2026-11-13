@@ -1,4 +1,5 @@
 """Immutable local run identity and one owned destination per job/Shanghai day."""
+import workspace_paths
 import contextlib,hashlib,json,os,sqlite3,uuid
 from datetime import datetime,timedelta,timezone
 from pathlib import Path
@@ -28,7 +29,7 @@ def from_profile(profile,fields=None):
     path=Path(profile).resolve()
     fields=fields or ledger.profile_check(path)[2]
     if not fields.get('company') or not fields.get('position'):raise ValueError('report_identity_unavailable')
-    try:meta=json.loads((path.parent/'project.json').read_text(encoding='utf-8-sig'))
+    try:meta=json.loads(workspace_paths.metadata_path(path).read_text(encoding='utf-8-sig'))
     except (OSError,ValueError):meta={}
     namespace=fields.get('candidate_namespace') or meta.get('candidate_namespace') or meta.get('project_id') or fields['company']+'\0'+fields['position']
     return dict(job=hashlib.sha256(namespace.encode()).hexdigest(),company=fields['company'],position=fields['position'],
@@ -85,19 +86,30 @@ def owned(path,expected,unknown_allowed=False):
         raise
     except (ValueError,KeyError):return False
 
+def registered_destination(db, row, root, date, job):
+    previous = Path(row[0])
+    path = workspace_paths.relocate_report(previous, root)
+    if path != previous:
+        if not owned(path, (owner(db), date, job), unknown_allowed=True):
+            raise ValueError('report_owner_conflict_after_layout_change')
+        db.execute('UPDATE report_destinations SET path=?,path_key=? WHERE day=? AND job=?',
+                   (str(path), normalized(path), date, job))
+    return path
+
+
 def destination(db,root,stamp,profile):
     schema(db);identity=for_profile(db,profile);date=day(stamp);job=identity['job']
     row=db.execute('SELECT path FROM report_destinations WHERE day=? AND job=?',(date,job)).fetchone()
-    if row:return Path(row[0])
+    if row:return registered_destination(db,row,root,date,job)
     from report_paths import filename_component
-    folder=Path(root).resolve()/'自动投递记录'/date
+    folder=workspace_paths.records_dir(Path(root).resolve())/date
     prefix=filename_component(identity['company'])+'-'+filename_component(identity['position'])+'-投递记录-'
     own=owner(db)
     started=not db.in_transaction
     if started:db.execute('BEGIN IMMEDIATE')
     try:
         row=db.execute('SELECT path FROM report_destinations WHERE day=? AND job=?',(date,job)).fetchone()
-        if row:return Path(row[0])
+        if row:return registered_destination(db,row,root,date,job)
         for suffix in (job[:10],job[:20],job,job+'-'+own):
             path=folder/(prefix+suffix+'.xlsx');key=normalized(path)
             if db.execute('SELECT 1 FROM report_destinations WHERE path_key=?',(key,)).fetchone():continue

@@ -1,5 +1,6 @@
 """Independent, idempotent run termination; never relies on the interrupted agent."""
 from __future__ import annotations
+import workspace_paths
 import argparse
 import contextlib
 import io
@@ -27,7 +28,7 @@ def binding_action(binding,stop=False):
     if binding['kind']=='uia':
         with tempfile.TemporaryDirectory(prefix='codex-stop-') as directory:
             source=Path(directory)/'binding.json';source.write_text(json.dumps(binding,ensure_ascii=False),encoding='utf-8')
-            result=subprocess.run(powershell_host.command(Path(__file__).with_name('codex-stop.ps1'),'-Binding',source,'-Action','Stop' if stop else 'Probe'),capture_output=True,timeout=8,**hidden_options())
+            result=subprocess.run(powershell_host.command(Path(__file__).with_name('codex-stop.ps1'),'-Binding',source,'-Action','Stop' if stop else 'Probe'),capture_output=True,timeout=15,**hidden_options())
             if result.returncode: raise RuntimeError('codex_stop_failed: '+result.stderr.decode('utf-8',errors='replace')[-1600:])
             return json.loads(result.stdout.decode('utf-8-sig'))
     with tempfile.TemporaryDirectory(prefix='codex-stop-') as directory:
@@ -71,7 +72,7 @@ def interrupt_run(db,run_id):
     try:
         binding=bind_run(db,run_id)
         status=binding_action(binding,True)['state']
-        if status not in ('interrupted','idle'):raise RuntimeError('unexpected_interrupt_state: '+status)
+        if status not in ('interrupted','idle','unconfirmed'):raise RuntimeError('unexpected_interrupt_state: '+status)
     except Exception as exc:
         status='failed: '+str(exc)
     db.execute('UPDATE runs SET interrupt_status=? WHERE run_id=?',(status,run_id))
@@ -94,7 +95,7 @@ def final_report(db,run_id,root):
     paths=[]
     for date,stamp in sorted(dates.items()):
         path=report_store.destination(db,root,stamp,run['profile_path'])
-        try:candidate_log.workbook(db,root,stamp,profile_path=run['profile_path'])
+        try:path=candidate_log.workbook(db,root,stamp,profile_path=run['profile_path'])
         except (OSError,ValueError):pass
         paths.append(path)
     return paths[-1]
@@ -118,6 +119,8 @@ def finalize(db,run_id,root,interrupt=True,opener=None):
         owner=f'{os.getpid()}:{run_safety.process_birth(os.getpid()):.9f}:{uuid.uuid4().hex}'
         db.execute('UPDATE runs SET finalizer_owner=?,finalizer_claimed_at=? WHERE run_id=?',(owner,ledger.iso(ledger.now()),run_id))
     try:
+        import page_layout
+        page_layout.restore(db,run_id)
         if interrupt:interrupt_run(db,run_id)
         # Cancel only registered helper processes whose creation time still matches.
         until=time.monotonic()+5
@@ -158,11 +161,19 @@ def report_status(db,run_id):
     identity=report_store.for_run(db,run_id)
     rows=db.execute('SELECT day,path,pending,error FROM report_destinations WHERE job=? ORDER BY day',(identity['job'],)).fetchall()
     dates=affected_dates(db,run_id);rows=[r for r in rows if r['day'] in dates]
-    return dict(run_id=run_id,report_pending=any(r['pending'] for r in rows),report_paths=[r['path'] for r in rows],reports=[dict(r) for r in rows])
+    reports=[dict(r) for r in rows]
+    has_sync=db.execute("SELECT 1 FROM sqlite_master WHERE name='report_sync'").fetchone()
+    if has_sync:
+        for item in reports:
+            sync=db.execute('SELECT data_pending,viewer_pending,data_error,viewer_error,batch FROM report_sync WHERE day=? AND job=?',(item['day'],identity['job'])).fetchone()
+            if sync:item.update(dict(sync))
+    zoom=db.execute('SELECT value FROM settings WHERE key=?',('boss_zoom/'+run_id,)).fetchone()
+    return dict(run_id=run_id,report_pending=any(r['pending'] for r in rows),report_paths=[r['path'] for r in rows],reports=reports,
+                zoom_restore=json.loads(zoom[0]) if zoom else None)
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--db',type=Path,default=ledger.DEFAULT_DB)
-    p.add_argument('--run',required=True);p.add_argument('--output-root',type=Path,default=Path.home()/'Desktop')
+    p.add_argument('--run',required=True);p.add_argument('--output-root',type=Path,default=workspace_paths.desktop_dir())
     p.add_argument('--stop',action='store_true');a=p.parse_args()
     with contextlib.closing(ledger.connect(a.db)) as db:
         if a.stop: run_safety.request_stop(db,a.run,'manual_stop')

@@ -19,6 +19,7 @@ Set-StrictMode -Version Latest
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 . (Join-Path $PSScriptRoot 'boss-browser-binding.ps1')
+. (Join-Path $PSScriptRoot 'native-json.ps1')
 
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
@@ -60,8 +61,8 @@ function Invoke-CaptureGuard([scriptblock]$Action) {
     try {
         $held=$mutex.WaitOne(5000)
         if(-not $held){throw 'capture_action_lock_timeout'}
-        $check=& $SafetyPythonPath (Join-Path $PSScriptRoot 'run_safety.py') --db $LedgerDb check --run $Run --generation $Generation
-        if($LASTEXITCODE -ne 0){throw 'capture_run_stopped'}
+        $check=Invoke-NativeJson $SafetyPythonPath @((Join-Path $PSScriptRoot 'run_safety.py'),'--db',$LedgerDb,'check','--run',$Run,'--generation',[string]$Generation) 10000
+        if(($check|ConvertFrom-Json).state -ne 'ready'){throw 'capture_run_stopped'}
         & $Action
     } finally {if($held){$mutex.ReleaseMutex()};$mutex.Dispose()}
 }
@@ -340,12 +341,9 @@ if (-not $bottomConfirmed) {
 $longPath = Join-Path $OutputDir "resume-long.png"
 $offsetText = ($offsets | ForEach-Object { [string]$_ }) -join ","
 if ($Run) {
- $stitchJson = & $PythonPath (Join-Path $PSScriptRoot 'managed_helper.py') --db $LedgerDb --run $Run --generation $Generation -- $PythonPath $pipeline stitch --pages @pagePaths --offsets $offsetText --output $longPath
+ $stitchJson = Invoke-NativeJson $PythonPath (@((Join-Path $PSScriptRoot 'managed_helper.py'),'--db',$LedgerDb,'--run',$Run,'--generation',[string]$Generation,'--',$PythonPath,$pipeline,'stitch','--pages')+@($pagePaths)+@('--offsets',$offsetText,'--output',$longPath))
 } else {
-    $stitchJson = & $PythonPath $pipeline stitch --pages @pagePaths --offsets $offsetText --output $longPath
-}
-if ($LASTEXITCODE -ne 0) {
-    throw "resume_stitch_failed"
+    $stitchJson = Invoke-NativeJson $PythonPath (@($pipeline,'stitch','--pages')+@($pagePaths)+@('--offsets',$offsetText,'--output',$longPath))
 }
 $stitch = $stitchJson | ConvertFrom-Json
 $pageFilesRemoved = $false

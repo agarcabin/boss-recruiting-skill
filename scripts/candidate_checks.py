@@ -6,6 +6,7 @@ from pathlib import Path
 import coworker_progress
 import ledger
 import recruiting_rules
+import hashlib
 
 
 def table(db):
@@ -22,6 +23,8 @@ def mark_resume_opened(db, run_id, candidate_id):
 def record_resume_attempt(db, run_id, candidate_id, observation):
     previous = get(db, run_id, candidate_id, 'resume_attempted') or {}
     history = previous.get('observations', [previous['observation']] if previous.get('observation') else [])
+    if history and history[-1] == observation:
+        return
     _receipt(db, run_id, candidate_id, 'resume_attempted',
              {'attempted': True, 'observation': observation, 'observations': history + [observation]})
 
@@ -41,7 +44,23 @@ def worker_detail_ready(db, run_id, candidate_id):
 def evaluate_resume(db, run_id, candidate_id, observation):
     rules = recruiting_rules.run_rules(ledger.run_row(db, run_id))
     at = ledger.now()
-    result = coworker_progress.evaluate_for_rules(observation, rules, at)
+    if rules.get('mode') == 'card' and rules.get('coworker_notice_policy') == 1:
+        if (observation or {}).get('state') == 'present':
+            return dict(may_continue=False, skip=True, action='skip', reason='card_coworker_present')
+        mapped = card_as_resume(observation or {}) if observation else None
+    else:
+        mapped = observation
+    result = coworker_progress.evaluate_for_rules(mapped, rules, at)
+    if rules.get('coworker_notice_policy') == 1:
+        attempted = get(db, run_id, candidate_id, 'resume_attempted') or {}
+        for previous in attempted.get('observations', []):
+            actual = coworker_progress.evaluate_for_rules(previous, rules, at)
+            if actual.get('skip'):
+                return actual
+        if result.get('notice_required'):
+            receipt = get(db, run_id, candidate_id, 'coworker_notice') or {}
+            confirmed = receipt.get('notice_id') == notice_id(db, run_id, candidate_id, observation)
+            return dict(result, may_continue=confirmed, notice_confirmed=confirmed)
     if recruiting_rules.worker_v2(rules):
         attempted = get(db, run_id, candidate_id, 'resume_attempted') or {}
         for observed in attempted.get('observations', [attempted.get('observation')]):
@@ -58,6 +77,9 @@ def record(db,run_id,candidate_id,observation,kind='resume'):
     digest=ledger.run_candidate_hash(db,run_id,candidate_id)
     active=db.execute('SELECT * FROM candidate_progress WHERE run_id=? AND candidate_hash=?',(run_id,digest)).fetchone()
     if active is None:active=ledger.ensure_candidate(db,run_id,candidate_id)
+    rules = recruiting_rules.run_rules(ledger.run_row(db,run_id))
+    if rules.get('coworker_notice_policy') == 1:
+        record_resume_attempt(db,run_id,candidate_id,observation)
     if kind=='resume':
         result=evaluate_resume(db,run_id,candidate_id,observation)
     else:
@@ -65,6 +87,8 @@ def record(db,run_id,candidate_id,observation,kind='resume'):
         result=dict(may_continue=state=='absent',skip=state=='present',action='skip' if state=='present' else 'continue' if state=='absent' else 'review',state=state,evidence=observation.get('evidence',''))
         if not observation.get('evidence') or (state!='present' and not observation.get('lookup_completed')):
             result.update(may_continue=False,action='review',skip=False)
+        if rules.get('coworker_notice_policy') == 1 and state != 'present':
+            result = evaluate_resume(db,run_id,candidate_id,observation)
     db.execute('INSERT INTO candidate_checks VALUES (?,?,?,?,?) ON CONFLICT(run_id,candidate_hash,kind) DO UPDATE SET observation=excluded.observation,checked_at=excluded.checked_at',
                (run_id,active['candidate_hash'],kind,json.dumps(observation,ensure_ascii=False),ledger.iso(ledger.now())))
     return result
@@ -83,6 +107,26 @@ def require_resume(db,run_id,candidate_id):
     if not result['may_continue']:
         raise ValueError('coworker_check_before_analysis: '+str(result.get('reason',result['action'])))
     return observation
+
+
+def card_as_resume(observation):
+    if observation.get('state') == 'absent' and observation.get('lookup_completed'):
+        return dict(observation, state='empty')
+    return dict(observation, state='unavailable')
+
+
+def notice_id(db, run_id, candidate_id, observation):
+    run = ledger.run_row(db, run_id)
+    value = [run_id, ledger.run_candidate_hash(db,run_id,candidate_id), run['generation'],
+             run['rule_snapshot'], observation]
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
+def acknowledge_notice(db, run_id, candidate_id, observation, answer):
+    expected = notice_id(db,run_id,candidate_id,observation)
+    if not isinstance(answer,dict) or answer.get('notice_id') != expected or answer.get('displayed') is not True:
+        raise ValueError('coworker_notice_not_confirmed_in_current_chat')
+    _receipt(db,run_id,candidate_id,'coworker_notice',dict(notice_id=expected,displayed=True))
 
 
 def main():

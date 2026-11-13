@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = 'release-manifest.json'
 SOURCE = 'update-source.json'
 TOP_FILES = {'SKILL.md', 'CHANGELOG.md', 'README.md', SOURCE}
-MANAGED_DIRS = {'scripts', 'references', 'agents'}
+MANAGED_DIRS = {'scripts', 'references', 'agents', 'docs'}
 SUFFIXES = {'.py', '.ps1', '.md', '.json', '.yaml', '.yml', '.txt'}
 LIMIT = 32 * 1024 * 1024
 

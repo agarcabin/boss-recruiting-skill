@@ -1,6 +1,7 @@
 """Create a local, non-sending readiness report for the recruiting skill."""
 
 from __future__ import annotations
+import workspace_paths
 
 import argparse
 import importlib.metadata
@@ -33,7 +34,7 @@ def check(name, action):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output-root", type=Path, default=Path.home() / "Desktop")
+    parser.add_argument("--output-root", type=Path, default=workspace_paths.desktop_dir())
     parser.add_argument("--browser-verified", action="store_true")
     parser.add_argument("--browser-evidence", default="")
     args = parser.parse_args()
@@ -45,7 +46,7 @@ def main():
     resume_capture = skill / "scripts" / "resume_capture.ps1"
     idle_mouse = skill / "scripts" / "idle_mouse.py"
     ledger = skill / "scripts" / "ledger.py"
-    folder = args.output_root / "自动投递记录" / "标准化测试"
+    folder = workspace_paths.records_dir(args.output_root) / "标准化测试"
     checks = []
     checks.append(check("Python 与 Excel 库", lambda: __import__("openpyxl").__version__))
     checks.append(check("PDF 解析库", lambda: __import__("pypdf").__version__))

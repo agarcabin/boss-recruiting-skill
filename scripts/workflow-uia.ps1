@@ -1,5 +1,5 @@
 param(
- [ValidateSet('Select','PageJob','ResumePresence','Resume','ResumeFull','Greeting','Next','Close','CoworkerTab','RelatedClose','CardOpen')][string]$Action='Select',
+ [ValidateSet('Select','FilterState','LayoutState','PageJob','ResumePresence','Resume','ResumeFull','Greeting','Next','Close','CoworkerTab','RelatedClose','CardOpen')][string]$Action='Select',
  [long]$WindowHandle,[string]$SkipFile,[string]$CardRuntime
 )
 $OutputEncoding=[Text.UTF8Encoding]::new($false);[Console]::OutputEncoding=$OutputEncoding
@@ -21,6 +21,42 @@ foreach($d in (Get-BossDocuments $root)){
 }
 if(!$docs.Count){throw 'boss_document_unavailable'}
 function Target($node,$url){return @{browser_binding_id=(Get-BossBindingId);hwnd=$WindowHandle;runtime_id=$node.GetRuntimeId();name=$node.Current.Name;class_name=$node.Current.ClassName;document_url=$url}}
+if($Action -in @('FilterState','LayoutState')){
+ $buttons=@();$seenButtons=[Collections.Generic.HashSet[string]]::new()
+ $fc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ClassNameProperty,'filter-label-wrap')
+ foreach($doc in $docs|Where-Object {$_.url -notlike '*c-resume*'}){
+  foreach($node in $doc.element.FindAll([System.Windows.Automation.TreeScope]::Descendants,$fc)){
+   if($seenButtons.Add(($node.GetRuntimeId() -join ','))){$buttons+=,$node}
+  }
+ }
+ $bc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Button)
+ if(!$buttons.Count){foreach($doc in $docs|Where-Object {$_.url -notlike '*c-resume*'}){
+  foreach($node in $doc.element.FindAll([System.Windows.Automation.TreeScope]::Descendants,$bc)){
+   if($node.Current.Name -match '^筛选(?:条件)?(?:\s*[（(]?\d+[)）]?)?$' -and $seenButtons.Add(($node.GetRuntimeId() -join ','))){$buttons+=,$node}
+  }
+ }}
+ if($buttons.Count -ne 1){@{state='unknown';reason='filter_control_not_unique'}|ConvertTo-Json -Compress;exit}
+ $button=$buttons[0];$rect=$button.Current.BoundingRectangle;$view=$root.Current.BoundingRectangle
+ if($Action -eq 'LayoutState'){
+  $headerFits=(!$button.Current.IsOffscreen -and $rect.Left -ge $view.Left -and $rect.Right -le $view.Right -and $rect.Bottom -le $view.Bottom -and $rect.Top -ge $view.Top)
+  $cardFits=$true
+  $cc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ClassNameProperty,'card-item')
+  foreach($doc in $docs|Where-Object {$_.url -notlike '*c-resume*'}){
+   foreach($card in $doc.element.FindAll([System.Windows.Automation.TreeScope]::Descendants,$cc)){
+    if($card.Current.IsOffscreen){continue}
+    $cr=$card.Current.BoundingRectangle
+    if($cr.Left -lt $view.Left-2 -or $cr.Right -gt $view.Right+2){$cardFits=$false}
+   }
+  }
+  @{state='read';fits=($headerFits -and $cardFits);header_fits=$headerFits;cards_fit_horizontally=$cardFits}|ConvertTo-Json -Compress;exit
+ }
+ $labels=@($button.Current.Name)
+ $tc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Text)
+ foreach($node in $button.FindAll([System.Windows.Automation.TreeScope]::Descendants,$tc)){if(!$node.Current.IsOffscreen){$labels+=,$node.Current.Name}}
+ $counts=@($labels|ForEach-Object {[regex]::Matches($_,'\d+')|ForEach-Object {[int]$_.Value}}|Select-Object -Unique)
+ if($counts.Count -gt 1){@{state='unknown';reason='filter_count_ambiguous'}|ConvertTo-Json -Compress;exit}
+ @{state='read';count=$(if($counts.Count){$counts[0]}else{0});has_number=($counts.Count -gt 0)}|ConvertTo-Json -Compress;exit
+}
 if($Action -eq 'RelatedClose'){
  $cc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ClassNameProperty,'boss-popup__close')
  $hits=@()
@@ -75,13 +111,24 @@ if($Action -eq 'CardOpen'){
 }
 if($Action -eq 'Select'){
  $skip=@();if($SkipFile -and (Test-Path -LiteralPath $SkipFile)){$skip=@(Get-Content -LiteralPath $SkipFile -Raw|ConvertFrom-Json)}
- $seen=[Collections.Generic.HashSet[string]]::new();$cards=@();$ordered=@()
+ $skip=@($skip|Where-Object {$_ -is [string]})
+ $seen=[Collections.Generic.HashSet[string]]::new();$cards=@();$ordered=@();$scroll=@()
  foreach($doc in $docs){
   if($doc.url -like '*c-resume*'){continue}
   $cc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ClassNameProperty,'card-item')
   foreach($card in $doc.element.FindAll([System.Windows.Automation.TreeScope]::Descendants,$cc)){
    $rid=$card.GetRuntimeId() -join ','
    if($card.Current.IsOffscreen -or !$seen.Add($rid)){continue}
+   $ancestor=$card;$scrollPercent=-1
+   for($depth=0;$ancestor -and $depth -lt 10;$depth++){
+    $sp=$null
+    if($ancestor.TryGetCurrentPattern([System.Windows.Automation.ScrollPattern]::Pattern,[ref]$sp) -and $sp.Current.VerticallyScrollable){
+     $scrollPercent=$sp.Current.VerticalScrollPercent
+     if($scrollPercent -lt 100){$scroll+=,(Target $ancestor $doc.url)}
+     break
+    }
+    $ancestor=[System.Windows.Automation.TreeWalker]::RawViewWalker.GetParent($ancestor)
+   }
    $ordered+=,$rid
    if($rid -in $skip){continue}
    $wrapped=$card.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition)
@@ -91,12 +138,14 @@ if($Action -eq 'Select'){
    $avatarName=@($wrapped|Where-Object {$_.Current.ClassName -eq 'avatar' -and $_.Current.Name -and $_.Current.Name.Length -lt 35 -and $_.Current.Name -notmatch '(?i)头像|图片|说明|avatar|profile'}|Select-Object -First 1)
    $name=if($nameNode.Count){$nameNode[0].Current.Name}elseif($avatarName.Count){$avatarName[0].Current.Name}else{'姓名未暴露·卡片'+($cards.Count+1)}
    $open=Invoker $card
-   $cards+=@{candidate_id='uia-card:'+$rid;candidate_name=$name;card_runtime=$rid;card_target=(Target $card $doc.url);open_target=$(if($open){Target $open $doc.url}else{$null});hwnd=$WindowHandle;summary=$card.Current.Name}
+   $rect=$card.Current.BoundingRectangle;$viewport=$doc.element.Current.BoundingRectangle
+   $business='';$aid=$card.Current.AutomationId
+   if($aid -match '^(?:geek|candidate|resume)[-_]([A-Za-z0-9_-]{12,})$'){$business=$Matches[1]}
+   $cards+=@{candidate_id=$(if($business){'boss-geek:'+$business}else{'uia-card:'+$rid});business_id=$business;candidate_name=$name;card_runtime=$rid;card_target=(Target $card $doc.url);open_target=$(if($open){Target $open $doc.url}else{$null});hwnd=$WindowHandle;summary=$card.Current.Name;scroll_percent=$scrollPercent;bounds=@{x=$rect.X;y=$rect.Y;width=$rect.Width;height=$rect.Height};fully_visible=($rect.Left -ge $viewport.Left -and $rect.Right -le $viewport.Right -and $rect.Top -ge $viewport.Top -and $rect.Bottom -le $viewport.Bottom)}
   }
  }
- if($cards.Count){@{state='candidate';candidate=$cards[0];ordered_runtime_ids=$ordered;resume_open=(@($docs|Where-Object {$_.url -like '*c-resume*'}).Count -gt 0)}|ConvertTo-Json -Depth 7 -Compress}
+ if($cards.Count){$cards=@($cards|Sort-Object @{Expression={[math]::Round($_.bounds.y/18)}},@{Expression={$_.bounds.x}});@{state='candidate';candidate=$cards[0];candidates=$cards;scroll_target=$(if($scroll.Count){$scroll[0]}else{$null});ordered_runtime_ids=$ordered;resume_open=(@($docs|Where-Object {$_.url -like '*c-resume*'}).Count -gt 0)}|ConvertTo-Json -Depth 7 -Compress}
  else{
-  $scroll=@()
   foreach($doc in $docs){$p=$null;if($doc.element.TryGetCurrentPattern([System.Windows.Automation.ScrollPattern]::Pattern,[ref]$p) -and $p.Current.VerticallyScrollable -and $p.Current.VerticalScrollPercent -lt 100){$scroll+=,(Target $doc.element $doc.url)}}
   @{state='no_visible_candidate';scroll_target=$(if($scroll.Count){$scroll[0]}else{$null})}|ConvertTo-Json -Depth 6 -Compress
  }

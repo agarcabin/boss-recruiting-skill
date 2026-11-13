@@ -1,6 +1,7 @@
 """Discover, register, import, and export portable recruiting project profiles."""
 
 from __future__ import annotations
+import workspace_paths
 
 import argparse
 import contextlib
@@ -25,7 +26,7 @@ except (AttributeError, OSError):
 
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
-PROJECTS_ROOT = SKILL_ROOT / "profiles"
+PROJECTS_ROOT = workspace_paths.configs_dir()
 PACKAGE_FORMAT = "boss-recruiting-project/v1"
 MANIFEST_FORMAT = "boss-recruiting-manifest/v1"
 MAX_ARCHIVE_BYTES = 5 * 1024 * 1024
@@ -65,7 +66,10 @@ def latest_run_readonly(db_path: Path | None = None):
     return runs[0] if runs else None
 
 
-def encrypted_entry(root=PROJECTS_ROOT):
+def encrypted_entry(root=None):
+    root = Path(root) if root is not None else workspace_paths.configs_dir()
+    if root.resolve() == workspace_paths.configs_dir().resolve():
+        return None
     import project_vault
     skill_root=Path(root).resolve().parent
     if not project_vault.vault_path(skill_root).is_file():return None
@@ -75,7 +79,15 @@ def encrypted_entry(root=PROJECTS_ROOT):
                 state='locked',select_action='unlock',password_required=True)
 
 
-def project_listing(root=PROJECTS_ROOT):
+def project_listing(root=None):
+    root = Path(root) if root is not None else workspace_paths.configs_dir()
+    if root.resolve() == workspace_paths.configs_dir().resolve():
+        import local_catalog
+        catalog = local_catalog.scan(root)
+        return dict(items=catalog['projects'], companies=catalog['companies'],
+                    config_errors=catalog['errors'], config_root=catalog['root'],
+                    project_count=len(catalog['companies']), position_count=len(catalog['projects']),
+                    encrypted_group_present=False, company_sorting=company_order_status(catalog['projects']))
     projects=list_projects(root);locked=encrypted_entry(root)
     return dict(items=([locked] if locked else [])+projects,
                 project_count=len({str(p['company']) for p in projects})+bool(locked),
@@ -103,7 +115,7 @@ def build_home_menu(projects, latest_run, metadata=None, locked_entry=None):
         last='暂无记录'
     title='杰博人力创新招聘组自动打招呼 Skill'
     items=[f'1. 继续上次项目（{last}）',
-           f'2. 查看已有项目（已有 {project_count} 个项目，{position_count} 个岗位）',
+           f'2. 查看所有本地企业（共 {project_count} 家企业，{position_count} 个岗位）',
            '3. 创建新的项目',
            f"4. 更新项目（当前版本 {metadata['version']} - 更新日期 {metadata['updated_at'].replace('-','/')}）",
            '5. 测试配置环境','6. 退出打招呼']
@@ -114,6 +126,9 @@ def build_home_menu(projects, latest_run, metadata=None, locked_entry=None):
 
 def front_matter(path: Path) -> dict[str, str]:
     content = path.read_text(encoding="utf-8-sig")
+    import hr_job
+    if hr_job.is_hr(content):
+        return hr_job.fields(path, content)
     match = re.match(r"\A---\s*\n(.*?)\n---\s*\n", content, re.S)
     if not match:
         raise ValueError(f"front_matter_missing:{path}")
@@ -149,7 +164,7 @@ def read_project(profile: Path) -> dict[str, object]:
     company, position = fields.get("company", "").strip(), fields.get("position", "").strip()
     if not company or not position:
         raise ValueError("profile_identity_missing")
-    metadata_path = profile.parent / "project.json"
+    metadata_path = workspace_paths.metadata_path(profile)
     metadata: dict[str, object] = {}
     if metadata_path.is_file():
         try:
@@ -175,7 +190,7 @@ def read_project(profile: Path) -> dict[str, object]:
 def register_project(profile: Path, project_id: str = "") -> dict[str, object]:
     profile = profile.resolve()
     project = read_project(profile)
-    metadata_path = profile.parent / "project.json"
+    metadata_path = workspace_paths.metadata_path(profile)
     existing: dict[str, object] = {}
     if metadata_path.is_file():
         try:
@@ -197,8 +212,8 @@ def register_project(profile: Path, project_id: str = "") -> dict[str, object]:
     return project
 
 
-def list_projects(root: Path = PROJECTS_ROOT) -> list[dict[str, object]]:
-    root = root.resolve()
+def list_projects(root: Path | None = None) -> list[dict[str, object]]:
+    root = (Path(root) if root is not None else workspace_paths.configs_dir()).resolve()
     if not root.is_dir():
         return []
     projects: list[dict[str, object]] = []
@@ -375,7 +390,7 @@ def import_project(archive_path: Path, root: Path = PROJECTS_ROOT, overwrite: bo
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, default=PROJECTS_ROOT)
+    parser.add_argument("--root", type=Path, default=workspace_paths.configs_dir())
     parser.add_argument("--db", type=Path, help="Read-only ledger path for the home menu")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("list")
@@ -402,7 +417,8 @@ def main() -> None:
             output(state="projects", **project_listing(args.root),**installed_metadata(),
                    menu_item_1='1. 继续上次项目（企业｜岗位；运行状态，成功招呼 x 人）')
         elif args.command == "menu":
-            output(**build_home_menu(list_projects(args.root),latest_run_readonly(args.db),locked_entry=encrypted_entry(args.root)))
+            import quick_start
+            output(**quick_start.prepare('菜单1',args.db,root=args.root))
         elif args.command == "unlock":
             import subprocess
             command=[sys.executable,str(SKILL_ROOT/'scripts/project_vault.py'),'unlock','--root',str(args.root.resolve().parent)]

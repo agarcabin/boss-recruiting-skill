@@ -55,7 +55,7 @@ if(!$buttons[0].TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::
 if($Action -eq 'Stop'){
  $invoke.Invoke()
  $confirmed=$false
- for($i=0;$i -lt 20;$i++){
+ for($i=0;$i -lt 100;$i++){
   Start-Sleep -Milliseconds 100
   try{
    $scope=Get-BoundScope
@@ -63,6 +63,6 @@ if($Action -eq 'Stop'){
    if($remaining.Count -eq 0 -and (Test-IdleScope $scope)){$confirmed=$true;break}
   }catch [System.Windows.Automation.ElementNotAvailableException] {continue}
  }
- if(!$confirmed){throw 'turn_interrupt_not_confirmed'}
+ if(!$confirmed){@{state='unconfirmed';kind='uia';reason='turn_interrupt_not_confirmed';chat_marker=$b.chat_marker}|ConvertTo-Json -Compress;exit 0}
 }
 @{state= $(if($Action -eq 'Stop'){'interrupted'}else{'ready'});kind='uia';chat_marker=$b.chat_marker} | ConvertTo-Json -Compress

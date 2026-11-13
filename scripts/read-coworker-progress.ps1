@@ -22,6 +22,7 @@ function Emit-Observation([string]$State, [string]$Timestamp, [string]$Evidence,
         lookup_completed = ($State -eq "not_found")
         records = @($Entries)
         records_complete = $Complete
+        observed_at = [DateTimeOffset]::Now.ToString('o')
     } | ConvertTo-Json -Depth 6 -Compress
 }
 
@@ -61,7 +62,7 @@ try {
             }
         }
         if($fallbackHeaders.Count -eq 0){
-            Emit-Observation "not_found" "" "UIA:唯一可见起始BOSS文档及当前实际存在的主推荐/推荐iframe/简历iframe均定向查询同事沟通进度，未找到；按用户指定视为未沟通"
+            Emit-Observation "unavailable" "" "coworker_header_not_found"
             exit
         }
         if($fallbackHeaders.Count -ne 1){throw 'coworker_header_not_unique'}
@@ -108,14 +109,45 @@ try {
             exit
         }
     }
-    if (-not $foundPanel) { throw "coworker_first_record_not_readable" }
+    if (-not $foundPanel) {
+        # A tab strip may jump directly to the large resume dialog. The record
+        # List is a sibling, not a descendant of the tab's small parent.
+        $lc = [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::ListItem)
+        $items = @($scope.FindAll([System.Windows.Automation.TreeScope]::Descendants,$lc) | Where-Object {
+            $r=$_.Current.BoundingRectangle
+            !$_.Current.IsOffscreen -and $_.Current.ClassName -match '\bmate-log-item\b' -and
+            $r.Left -ge ($headerRect.Left-24) -and $r.Top -ge ($headerRect.Bottom-8) -and
+            $r.Right -le $documentRect.Right -and $r.Bottom -le $documentRect.Bottom
+        })
+        $lists=@{}
+        foreach($item in $items){
+            $parent=$walker.GetParent($item)
+            if($parent){$lists[($parent.GetRuntimeId() -join ',')]=$parent}
+        }
+        if($lists.Count -ne 1){throw 'coworker_record_list_not_unique'}
+        $panel=@($lists.Values)[0]
+        $nodes=$panel.FindAll([System.Windows.Automation.TreeScope]::Descendants,$textCondition)
+        if($nodes.Count -gt 120){throw 'coworker_panel_scope_too_large'}
+        $texts=@($nodes|Where-Object {!$_.Current.IsOffscreen}|ForEach-Object {
+            [pscustomobject]@{name=$_.Current.Name;rect=$_.Current.BoundingRectangle}
+        })
+        $records=@($items|Sort-Object @{Expression={$_.Current.BoundingRectangle.Top}}|ForEach-Object {
+            [pscustomobject]@{name=$_.Current.Name;rect=$_.Current.BoundingRectangle}
+        })
+        $texts+=@($records)
+        $scroll=$null
+        if($panel.TryGetCurrentPattern([System.Windows.Automation.ScrollPattern]::Pattern,[ref]$scroll) -and $scroll.Current.VerticallyScrollable){$historyComplete=$false}
+        if(!$records.Count){throw 'coworker_first_record_not_readable'}
+    }
     $entries=@()
     for($index=0;$index -lt $records.Count;$index++){
         $entry=$records[$index]
         $bottom=if($index+1 -lt $records.Count){$records[$index+1].rect.Top}else{$panel.Current.BoundingRectangle.Bottom}
         $entryTexts=@($texts|Where-Object {$_.rect.Top -ge $entry.rect.Top -and $_.rect.Top -lt $bottom})
         $dates=@($entryTexts|ForEach-Object {
-            [regex]::Matches($_.name,'\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?')|ForEach-Object {$_.Value}
+            [regex]::Matches($_.name,'(?<!\d)(?:\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2}(?::\d{2})?)?|(?:今天|昨天)(?:\s*\d{1,2}:\d{2})?|\d{1,2}月\d{1,2}日|\d{2}-\d{2})(?!\d)')|ForEach-Object {$_.Value}
         }|Select-Object -Unique)
         $timestamp=if($dates.Count -eq 1){$dates[0]}else{''}
         if(!$timestamp){$historyComplete=$false}

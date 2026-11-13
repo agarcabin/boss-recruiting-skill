@@ -1,5 +1,6 @@
 """Shared evidence-based eligibility; keywords never alter the observed score."""
 from __future__ import annotations
+import workspace_paths
 import copy
 import resume_special_rules
 import fast_assessment
@@ -10,7 +11,10 @@ from pathlib import Path
 CONFIG = Path(__file__).resolve().parents[1] / 'references' / 'recruiting-rules.json'
 
 def snapshot(profile: Path, fields: dict, greeting_mode: str | None = None) -> dict:
-    metadata_path = profile.parent / 'project.json'
+    import hr_job
+    if hr_job.is_hr(profile.read_text(encoding='utf-8-sig')):
+        return hr_job.snapshot(profile)
+    metadata_path = workspace_paths.metadata_path(profile)
     metadata = json.loads(metadata_path.read_text(encoding='utf-8-sig')) if metadata_path.is_file() else {}
     policy = fields.get('trigger_policy', metadata.get('trigger_policy', 'legacy'))
     import project_vault
@@ -35,8 +39,10 @@ def snapshot(profile: Path, fields: dict, greeting_mode: str | None = None) -> d
                  browser_target='codex_iab', short_view_wait=True, list_prefilter=True, ai_pros_cons=True, coworker_skip_wait_exempt=True)
     if policy == 'worker':
         rules['worker_policy_version'] = 2
-        rules.update(worker_deduction_version=1, worker_negative_keywords=['服务员','厨师','前台','传菜','销售','经理','主管'], worker_negative_points=10, worker_min_score=60)
+        rules.update(worker_deduction_version=1, worker_negative_keywords=['服务员','厨师','前台','传菜','销售','经理'], worker_negative_points=10, worker_min_score=60)
         rules['worker_keywords'] = list(dict.fromkeys(rules.get('worker_keywords', rules.get('worker_advantage', []) + rules.get('worker_expectation', []))))
+    rules.update(release_policy=1410, view_wait_policy=2, coworker_notice_policy=1,
+                 csv_reports=True, ocr_highlights=True, page_layout_policy=1)
     return rules
 
 
@@ -63,6 +69,9 @@ def positive_hits(text: str, words: list[str]) -> list[dict]:
     return list({(h['word'],h['quote']):h for h in hits}.values())
 
 def evaluate(rules: dict, payload: dict, min_score: int) -> dict:
+    if 'hr_job_config' in rules:
+        import hr_job
+        return hr_job.assessment(rules, payload)
     import project_vault
     rules=project_vault.normalize(rules)
     payload=project_vault.normalize(payload)
@@ -92,7 +101,8 @@ def evaluate(rules: dict, payload: dict, min_score: int) -> dict:
         if not isinstance(card,dict):
             raise ValueError('card_fields_required')
         coworker=card.get('coworker_contact',{})
-        if coworker.get('state')!='absent' or not coworker.get('lookup_completed') or not coworker.get('evidence'):
+        notified = rules.get('coworker_notice_policy') == 1 and coworker.get('notice_confirmed') is True
+        if not notified and (coworker.get('state')!='absent' or not coworker.get('lookup_completed') or not coworker.get('evidence')):
             return dict(eligible=False,score=0,trigger='coworker_skip' if coworker.get('state')=='present' else 'coworker_unknown',hits=[],requirements={})
         a = positive_hits(card.get('advantage',''),rules['worker_advantage'])
         e = positive_hits(card.get('expectation',''),rules['worker_expectation'])
@@ -242,6 +252,9 @@ def domain_group_score(rules,payload,min_score):
 
 
 def list_match(rules, payload):
+    if 'hr_job_config' in rules:
+        import hr_job
+        return hr_job.list_assessment(rules, payload)
     """Union of a job's vocabularies; a list hit never authorizes sending."""
     import group_policy
     config=rules.get('fulltext_groups') or {}

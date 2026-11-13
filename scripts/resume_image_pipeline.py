@@ -154,6 +154,22 @@ def box_bounds(box: Any) -> tuple[float, float, float, float]:
     )
 
 
+def word_entries(result):
+    """Support native flat word_results and nested per-line legacy results."""
+    value = getattr(result, 'word_results', None)
+    def walk(item):
+        if isinstance(item, (tuple, list)):
+            if len(item) >= 3 and isinstance(item[0], str):
+                try:
+                    yield dict(text=item[0], score=float(item[1]), box=list(box_bounds(item[2])))
+                except (TypeError, ValueError):
+                    return
+            else:
+                for child in item:
+                    yield from walk(child)
+    return list(walk(value))
+
+
 def normalized_text(value: str) -> str:
     return re.sub(r"\s+", "", value)
 
@@ -178,9 +194,13 @@ def rapidocr(args: argparse.Namespace) -> None:
         end_y = min(height, start_y + tile_height)
         tile = image[start_y:end_y, :]
         started = time.perf_counter()
-        raw_result = engine(tile)
+        if engine_name == 'rapidocr':
+            raw_result = engine(tile, return_word_box=True, return_single_char_box=True)
+        else:
+            raw_result = engine(tile, return_word_box=True)
         elapsed = time.perf_counter() - started
         boxes, texts, scores = normalize_result(raw_result)
+        chars = word_entries(raw_result)
         accepted = 0
         for raw_box, text, score in zip(boxes, texts, scores):
             text = text.strip()
@@ -201,6 +221,9 @@ def rapidocr(args: argparse.Namespace) -> None:
                     ],
                     "absolute_y": round(start_y + top, 2),
                     "tile": tile_index,
+                    "characters": [dict(c, box=[c['box'][0], start_y+c['box'][1], c['box'][2], start_y+c['box'][3]])
+                        for c in chars if left-2 <= (c['box'][0]+c['box'][2])/2 <= right+2
+                        and top-2 <= (c['box'][1]+c['box'][3])/2 <= bottom+2],
                 }
             )
             accepted += 1
@@ -236,6 +259,7 @@ def rapidocr(args: argparse.Namespace) -> None:
     args.text_output.parent.mkdir(parents=True, exist_ok=True)
     args.text_output.write_text(text + ("\n" if text else ""), encoding="utf-8")
     payload = {
+        "schema": "resume-ocr/v2",
         "state": "ok",
         "engine": engine_name,
         "image": str(args.image.resolve()),

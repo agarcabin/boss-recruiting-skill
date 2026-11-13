@@ -48,7 +48,18 @@ class WindowsAdapter:
             raise ValueError('related_recommendations_popup_not_closed')
 
     def select(self,processed):
+        rules=recruiting_rules.run_rules(ledger.run_row(self.db,self.run))
+        if rules.get('release_policy') == 1410 and self.allow_ocr and not getattr(self,'runtime_checked',False):
+            import sys
+            checked=subprocess.run([sys.executable,'-I','-c','import cv2,numpy,rapidocr,onnxruntime'],
+                capture_output=True,timeout=20,**hidden_options())
+            if checked.returncode:
+                raise RuntimeError('ocr_runtime_not_ready: '+checked.stderr.decode('utf-8',errors='replace')[-800:])
+            self.runtime_checked=True
         self.dismiss_related()
+        if rules.get('page_layout_policy'):
+            import page_layout
+            page_layout.prepare(self)
         self.processed=processed
         if not getattr(self,'page_job_recorded',False):
             observed=self.query('PageJob')
@@ -61,11 +72,21 @@ class WindowsAdapter:
         for attempt in range(3):
             result=self.query('Select',processed=processed)
             if result['state']=='candidate':
-                candidate=result['candidate'];self.hwnd=candidate['hwnd'];return candidate
+                if rules.get('page_layout_policy'):
+                    import card_layout
+                    candidate=card_layout.choose(result.get('candidates',[result['candidate']]),processed)
+                    if candidate and not candidate.get('fully_visible',True):
+                        self.invoke(candidate['card_target'],'Reveal');time.sleep(.2);continue
+                    if candidate:self.hwnd=candidate['hwnd'];return candidate
+                else:
+                    candidate=result['candidate'];self.hwnd=candidate['hwnd'];return candidate
             if result.get('scroll_target'):
                 self.invoke(result['scroll_target'],'Scroll');time.sleep(.2)
             else:return None
         return None
+
+    def filter_state(self):
+        return self.query('FilterState')
 
     def open(self,candidate,mode):
         self.hwnd=candidate.get('hwnd',self.hwnd)
@@ -95,13 +116,15 @@ class WindowsAdapter:
                 observation=self.ps('capture-card.ps1',*args,'-NoImage')
             self.observations[candidate['candidate_id']]=(observation,folder/'card.uia.json',folder/'card.png')
             return dict(observation['card']['coworker_contact'],image=str(folder/'card.png'),uia_json=str(folder/'card.uia.json'),image_saved=observation.get('image_saved',False))
-        observation=self.ps('read-coworker-progress.ps1','-WindowHandle',str(self.hwnd))
-        if observation['state']=='unavailable' and 'tab_not_confirmed' in observation.get('evidence',''):
+        observation=dict(state='unavailable',evidence='coworker_tab_not_confirmed')
+        for attempt in range(2):
             tab=self.query('CoworkerTab')
             if tab['state']=='found' and not tab['match']['selected'] and tab['match'].get('target'):
-                self.invoke(tab['match']['target']);tab=self.query('CoworkerTab')
+                self.invoke(tab['match']['target']);time.sleep(.25);tab=self.query('CoworkerTab')
             if tab['state']=='found' and tab['match']['selected']:
                 observation=self.ps('read-coworker-progress.ps1','-WindowHandle',str(self.hwnd),'-CoworkerTabConfirmed')
+            if observation.get('state') in ('empty','records','first_record'):break
+            if attempt == 0:time.sleep(.3)
         return observation
 
     def complete_visual(self,candidate,answer):
@@ -163,7 +186,20 @@ class WindowsAdapter:
                 result['read_complete']=False
             folder=self.folder/('resume-'+uuid.uuid4().hex)
             try:
-                captured=capture_resume.capture(self.db,self.run,candidate['candidate_id'],self.hwnd,folder)
+                try:
+                    captured=capture_resume.capture(self.db,self.run,candidate['candidate_id'],self.hwnd,folder)
+                except (OSError,ValueError,subprocess.SubprocessError) as first:
+                    if not rules.get('release_policy') or 'c_resume_document_missing' not in str(first) and 'c_resume_document_missing' not in str(getattr(first,'stderr','')):
+                        raise
+                    # Recovery is allowed only while the original list card is
+                    # still uniquely exposed. Never open a next-person arrow.
+                    same=self.query('CardOpen',candidate)
+                    if same.get('state')!='found':raise
+                    self.close()
+                    retry=dict(candidate,open_target=same['match']['target'],already_open=False)
+                    self.open(retry,mode)
+                    folder=self.folder/('resume-retry-'+uuid.uuid4().hex)
+                    captured=capture_resume.capture(self.db,self.run,candidate['candidate_id'],self.hwnd,folder)
                 result['resume_evidence']=captured['resume_evidence']
                 result.pop('resume_save_note',None)
                 ocr_text=Path(captured['resume_evidence']['ocr_text']).read_text(encoding='utf-8-sig')

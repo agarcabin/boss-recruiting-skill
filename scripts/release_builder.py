@@ -185,10 +185,14 @@ def build(root,output,public_root,legacy_dir=None,include_user_projects=False):
         allowed.update(path.relative_to(root).as_posix() for path in (root/'references').glob('v*-policy.md'))
         allowed.add('scripts/project_source.py')
         allowed.add('scripts/test_release149.py')
-    for name in ('scripts','references','agents'):
+    if allowed is not None:
+        from skill_update import managed_name
+        allowed.update(p.relative_to(root).as_posix() for folder in ('scripts','references','agents','docs')
+                       for p in (root/folder).rglob('*') if p.is_file() and managed_name(p.relative_to(root).as_posix()))
+    for name in ('scripts','references','agents','docs'):
         for path in (root/name).rglob('*'):
             if not path.is_file() or path.suffix not in ('.py','.ps1','.md','.json','.yaml','.yml','.txt') or '__pycache__' in path.parts:continue
-            if path.name.startswith('test_') and path.name not in ('test_core_contract.py','test_release149.py'):continue
+            if path.name.startswith('test_') and path.name not in ('test_core_contract.py','test_release149.py','test_release1410.py','test_hr_job.py','test_local_startup.py','test_misjudgment_review.py'):continue
             if path.name in ('resume-extraction-test-results.md','resume-extraction-test-plan.md','uia-resume-diagnostic-report.md'):continue
             if name=='references' and path.name in ('recruiting-rules.json','project-vault.json','publisher-key.json'):continue
             relative=path.relative_to(root).as_posix()

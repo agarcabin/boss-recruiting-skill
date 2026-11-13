@@ -1,4 +1,5 @@
 """Local project vault. A failed or skipped unlock leaves user projects usable."""
+import workspace_paths
 import argparse,base64,copy,hashlib,json,os,re,shutil,sys,tempfile,uuid,zlib
 from pathlib import Path,PurePosixPath
 import vault_crypto as crypto
@@ -246,7 +247,7 @@ def migrate_installed_upgrade(root=None):
     return unlock(root,upgrade_from=file.parent)
 
 def readable(profile):
-    profile=Path(profile);meta=profile.parent/'project.json'
+    profile=Path(profile);meta=workspace_paths.metadata_path(profile)
     try:metadata=json.loads(meta.read_text(encoding='utf-8-sig')) if meta.is_file() else {}
     except (OSError,ValueError):return False
     if metadata.get('origin')=='bundle' and vault_path().is_file():
@@ -257,7 +258,7 @@ def readable(profile):
 
 def selectable(profile):
     if not readable(profile):return False
-    meta=Path(profile).parent/'project.json'
+    meta=workspace_paths.metadata_path(profile)
     try:metadata=json.loads(meta.read_text(encoding='utf-8-sig')) if meta.is_file() else {}
     except (OSError,ValueError):return False
     retired=rule_config(ROOT/'references/recruiting-rules.json').get('retired_project_ids',[])

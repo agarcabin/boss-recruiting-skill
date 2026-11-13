@@ -1,4 +1,5 @@
 """Launch the overlay outside the cancellable agent tool's process job."""
+import workspace_paths
 import argparse
 import os
 import subprocess
@@ -14,7 +15,7 @@ def launch_process(command):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--db',type=Path,default=ledger.DEFAULT_DB)
-    p.add_argument('--run',required=True);p.add_argument('--output-root',type=Path,default=Path.home()/'Desktop')
+    p.add_argument('--run',required=True);p.add_argument('--output-root',type=Path,default=workspace_paths.desktop_dir())
     p.add_argument('--chat-title',help='Exact recruiting chat title when renamed from the default');a=p.parse_args()
     pythonw=Path(sys.executable).with_name('pythonw.exe')
     if not pythonw.is_file(): raise RuntimeError('pythonw_missing')

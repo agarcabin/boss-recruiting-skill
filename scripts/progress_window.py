@@ -1,6 +1,7 @@
 """Small Windows progress and control window for a recruiting run."""
 
 from __future__ import annotations
+import workspace_paths
 
 import argparse
 import contextlib
@@ -270,7 +271,7 @@ def snapshot(db: sqlite3.Connection, run_id: str, output_root=None) -> dict:
         FROM candidate_progress WHERE run_id=? AND finished_at IS NOT NULL""", (run_id,)).fetchone()
     average_seconds = round(average_row[0]) if average_row[0] is not None else None
     remaining_minutes,basis=daily_metrics.estimate(run,progress["started"],sent,average_seconds,elapsed)
-    daily=daily_metrics.daily_counts(db,run,output_root or Path.home()/"Desktop")
+    daily=daily_metrics.daily_counts(db,run,output_root or workspace_paths.desktop_dir())
     viewing_average_seconds=viewing_average(db,run_id,progress['started'],elapsed)
     step=workflow_detail(db,run_id,state,active,elapsed)
     has_workflow=db.execute("SELECT 1 FROM sqlite_master WHERE name='workflow_state'").fetchone()
@@ -535,6 +536,8 @@ class ProgressWindow:
             if state=='paused' and getattr(self,'pausing',False):step='正在中断 Codex…'
             elif state=='paused' and interrupt.startswith(('failed','not_bound')):
                 step='招聘已暂停，Codex中断失败，请手动停止'
+            elif state=='paused' and interrupt=='unconfirmed':
+                step='招聘已暂停，尚未确认聊天停止，请检查Codex状态'
             self.status_canvas.itemconfigure(
                 self.state_item, text=f"{labels[state]} · {data['elapsed']} · {step}"
             )
@@ -620,7 +623,9 @@ class ProgressWindow:
             with contextlib.closing(ledger.connect(self.db_path)) as db:
                 status=ledger.run_row(db,self.run_id)['interrupt_status'] or ''
             if status.startswith(('failed','not_bound')):
-                messagebox.showwarning('招聘已结束','招聘运行已结束，但未能中断 Codex，请手动点击 Codex 的停止按钮。\n'+status,parent=self.root)
+                messagebox.showwarning('招聘已结束','招聘已停止并完成收尾，但中断当前聊天时出现问题，请检查 Codex 状态；详细原因已记录在运行结果。',parent=self.root)
+            elif status=='unconfirmed':
+                messagebox.showwarning('招聘已结束','招聘已停止并完成收尾，但尚未确认当前聊天是否停止。请检查 Codex；若仍在运行，可手动点击停止。',parent=self.root)
         self.root.destroy()
         if report: os.startfile(report)
 
@@ -631,7 +636,7 @@ class ProgressWindow:
         try:
             state = self.read()
             if state.get('report_pending'):
-                messagebox.showinfo('简报待补写','当前简报尚未同步完成；关闭占用的Excel后补写同一文件。',parent=self.root)
+                messagebox.showinfo('简报待同步','当前简报尚未同步完成，请查看运行状态中的具体原因。若CSV已更新但展示表未就绪，请检查Excel的数据连接；程序会重试。',parent=self.root)
                 return
             path = Path(state['report_path'])
             if not path.is_file():
@@ -648,7 +653,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, default=ledger.DEFAULT_DB)
     parser.add_argument("--run", required=True)
-    parser.add_argument("--output-root", type=Path, default=Path.home() / "Desktop")
+    parser.add_argument("--output-root", type=Path, default=workspace_paths.desktop_dir())
     parser.add_argument("--demo", action="store_true", help="Label a temporary test run as demo data")
     args = parser.parse_args()
     with contextlib.closing(ledger.connect(args.db)) as db:

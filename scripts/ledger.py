@@ -1,6 +1,7 @@
 """Local, privacy-minimal ledger for one-at-a-time BOSS greeting runs."""
 
 from __future__ import annotations
+import workspace_paths
 
 import argparse
 import hashlib
@@ -28,7 +29,7 @@ except (AttributeError, OSError):
 DEFAULT_TARGET = 150
 DEFAULT_MAX_VIEWS = 300
 DEFAULT_DB = (Path(os.environ['BOSS_STATE_DIR']) if os.environ.get('BOSS_STATE_DIR') else Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "Codex" / "recruiting-greetings") / "ledger.sqlite3"
-PROFILE_ROOT = Path(__file__).resolve().parents[1] / "profiles"
+PROFILE_ROOT = workspace_paths.configs_dir()
 
 
 def now() -> datetime:
@@ -143,6 +144,12 @@ def profile_check(path: Path) -> tuple[bool, str, dict[str, str]]:
     if not path.is_file():
         return False, "profile_missing", {}
     content = path.read_text(encoding="utf-8-sig")
+    import hr_job
+    if hr_job.is_hr(content):
+        try:
+            return True, 'ready', hr_job.fields(path, content)
+        except (ValueError, OSError) as exc:
+            return False, str(exc), {}
     match = re.match(r"\A---\s*\n(.*?)\n---\s*\n", content, re.S)
     if not match:
         return False, "front_matter_missing", {}
@@ -180,7 +187,12 @@ def candidate_hash(project: str, candidate_id: str) -> str:
 
 
 def profile_hash(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    data = path.read_bytes()
+    import hr_job
+    if hr_job.is_hr(data.decode('utf-8-sig')):
+        from misjudgment_review import MARKER
+        data = data.replace(MARKER.encode('utf-8'), b'')
+    return hashlib.sha256(data).hexdigest()
 
 
 def unresolved(db: sqlite3.Connection) -> int:
@@ -363,7 +375,7 @@ def candidate_finish(db,args):
 
 def start(db,args):
     path = Path(args.profile).resolve()
-    if not path.is_relative_to(PROFILE_ROOT.resolve()):
+    if not (path.is_relative_to(PROFILE_ROOT.resolve()) or path.is_relative_to(workspace_paths.configs_dir().resolve())):
         output(state='blocked',reason='profile_outside_skill_profiles'); return
     ok,reason,fields = profile_check(path)
     if not ok:
@@ -439,7 +451,7 @@ def recent_runs(db: sqlite3.Connection, args: argparse.Namespace) -> None:
         except OSError:
             fields = {}
         metadata: dict[str, object] = {}
-        metadata_path = profile_path.parent / "project.json"
+        metadata_path = workspace_paths.metadata_path(profile_path)
         try:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError):
@@ -516,7 +528,7 @@ def _reserve(db,args):
     assessment = db.execute("SELECT * FROM assessments WHERE run_id=? AND candidate_hash=?",(args.run,digest)).fetchone() if exists else None
     if not assessment or assessment['decision']!='greet' or not assessment_eligible(run,assessment):
         output(state='blocked',reason='assessment_not_eligible'); return
-    if assessment['evaluation_mode']!='card':
+    if assessment['evaluation_mode']!='card' or recruiting_rules.run_rules(run).get('coworker_notice_policy') == 1:
         import candidate_checks
         coworker = candidate_checks.evaluate_resume(db,args.run,args.candidate_id,json.loads(assessment['coworker_progress'] or '{}'))
         if not coworker['may_continue']:
