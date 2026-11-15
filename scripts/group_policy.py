@@ -63,8 +63,8 @@ def evaluate(rules,payload):
             b=[dict(h,group='B') for h in recruiting_rules.positive_hits(value,config.get('b',[]))]
         count=len({h['word'].casefold() for h in a+b})
         both=bool(a and b)
-        base=config['both_base'] if both else config['single_score'] if count else 0
-        score=base+(config['extra_points']*max(0,count-2) if both else 0) if config.get('single_group_fixed') else base+config['extra_points']*max(0,count-(2 if both else 1))
+        base=config['both_base'] if both else 60 if count else 0
+        score=base+config['extra_points']*max(0,count-2) if both else base
         complete=payload.get('read_complete') is True
         eligible=complete and bool(count) and score>=config['greeting_min_score']
         trigger='fulltext_ab' if both else 'single_group' if count else 'none'
@@ -80,8 +80,8 @@ def evaluate(rules,payload):
     if mode=='keyword_incremental':
         # Opt-in keyword-only policy; historical fixed/incremental snapshots keep their behavior.
         count=len({h['word'].casefold() for h in a+b})
-        base=config['both_base'] if both else config['single_score'] if count else 0
-        score=base if config.get('single_group_fixed') and not both else base+config['extra_points']*max(0,count-(2 if both else 1))
+        base=config['both_base'] if both else 60 if count else 0
+        score=base+config['extra_points']*max(0,count-2) if both else base
         if 'cap' in config:score=min(config['cap'],score)
         import resume_special_rules
         adjusted=resume_special_rules.score_details(rules,payload,score) if count else dict(

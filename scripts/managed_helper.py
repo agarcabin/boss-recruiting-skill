@@ -5,21 +5,30 @@ import os
 import subprocess
 import sys
 import time
+import json
 from pathlib import Path
 import ledger
 import run_safety
-from windows_process import hidden_options
+import capture_control
+import foreground_activity
+from windows_process import hidden_options,decode_output
 
 def run(db,run_id,generation,command):
-    with run_safety.action_lock(db):
-        state=run_safety.ensure_writable(db,run_id,generation)
-        process=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,**hidden_options())
-        db.execute('INSERT INTO run_helpers VALUES (?,?,?)',(run_id,process.pid,run_safety.process_birth(process.pid)))
+    capture_control.require_running(db,run_id,generation)
+    with foreground_activity.track(db,run_id,command):
+        return _run(db,run_id,generation,command)
+
+
+def _run(db,run_id,generation,command):
+    process=None;registered=False
     try:
+        with run_safety.action_lock(db):
+            capture_control.require_running(db,run_id,generation)
+            process=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,**hidden_options())
+            db.execute('INSERT INTO run_helpers VALUES (?,?,?)',(run_id,process.pid,run_safety.process_birth(process.pid)))
+            registered=True
         while True:
-            state=ledger.run_row(db,run_id)
-            if state['stop_reason'] or state['generation']!=generation:
-                process.kill();process.communicate(timeout=2);raise ValueError('helper_cancelled')
+            capture_control.require_running(db,run_id,generation)
             try:
                 stdout,stderr=process.communicate(timeout=.2)
                 break
@@ -29,8 +38,20 @@ def run(db,run_id,generation,command):
         sys.stderr.buffer.write(stderr);sys.stderr.buffer.flush()
         return process.returncode
     finally:
-        if process.poll() is None: process.kill();process.wait(timeout=2)
-        db.execute('DELETE FROM run_helpers WHERE run_id=? AND pid=?',(run_id,process.pid))
+        try:
+            if process is not None and process.poll() is None:
+                process.kill();process.wait(timeout=2)
+        finally:
+            if registered:
+                db.execute('DELETE FROM run_helpers WHERE run_id=? AND pid=?',(run_id,process.pid))
+
+
+def write_error(state,exc,**values):
+    message=dict(state=state,reason=str(exc),error_type=type(exc).__name__,**values)
+    if isinstance(exc,subprocess.CalledProcessError):
+        message.update(exit_code=exc.returncode,reason=decode_output(exc.stderr or exc.stdout) or str(exc))
+    sys.stderr.buffer.write((json.dumps(message,ensure_ascii=False)+'\n').encode('utf-8'))
+    sys.stderr.buffer.flush()
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--db',type=Path,default=ledger.DEFAULT_DB)
@@ -42,6 +63,13 @@ def main():
     allowed={'resume_capture.ps1','resume_image_pipeline.py','capture-card.ps1','idle_mouse.py'}
     scripts=[Path(x).name for x in command if x.endswith(('.py','.ps1'))]
     if len(scripts)!=1 or scripts[0] not in allowed: raise ValueError('unsupported_managed_helper')
-    with contextlib.closing(ledger.connect(a.db)) as db: code=run(db,a.run,a.generation,command)
+    try:
+        with contextlib.closing(ledger.connect(a.db)) as db: code=run(db,a.run,a.generation,command)
+    except capture_control.CaptureInterrupted as exc:
+        write_error('helper_interrupted',exc,foreground_required=exc.foreground_required,normal=exc.normal)
+        code=20
+    except (OSError,ValueError,RuntimeError,subprocess.SubprocessError) as exc:
+        write_error('helper_failed',exc)
+        code=1
     raise SystemExit(code)
 if __name__=='__main__':main()

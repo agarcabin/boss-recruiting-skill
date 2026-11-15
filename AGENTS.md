@@ -5,6 +5,7 @@
 - Develop the WeCom cloud knowledge migration on `codex/wecom-cloud-knowledge`.
 - Baseline: release `v1.4.9`, commit `6c15e45d4735e48c44860cac8bfa2f1119ab28de`.
 - Keep `main` as the existing release line until an explicit merge instruction.
+- Publish `main` with its normal numeric version; publish `codex/wecom-cloud-knowledge` as a test release with the same base version plus `-beta`.
 - This checkout contains public source. Installed profiles, candidate records, local state, credentials, and publisher keys belong outside this repository.
 - Do not copy the installed skill directory wholesale into Git. Follow the existing sanitized-source and signed-release workflow for releases.
 

@@ -49,23 +49,21 @@ class Worker149Tests(unittest.TestCase):
 
 
 class Quota149Tests(unittest.TestCase):
-    def test_window_persistence_and_upgrade(self):
+    def test_old_quota_does_not_limit_current_sending(self):
         with tempfile.TemporaryDirectory() as temp:
             file=Path(temp)/'quota.sqlite3'
             at=datetime(2026,11,9,tzinfo=timezone.utc)
             with contextlib.closing(sqlite3.connect(file)) as db:
                 db.row_factory=sqlite3.Row
                 db.execute('CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT)')
-                for i in range(10):self.assertEqual(greeting_rate.claim(db,str(i),at)['state'],'ready')
-                self.assertTrue(greeting_rate.claim(db,'0',at)['reused'])
+                db.execute('INSERT INTO settings VALUES (?,?)',('greeting_rate/v1',json.dumps(dict(started_at=at.isoformat(),used=10))))
+                for i in range(25):self.assertEqual(greeting_rate.claim(db,str(i),at)['state'],'ready')
                 db.commit()
             with contextlib.closing(sqlite3.connect(file)) as db:
                 db.row_factory=sqlite3.Row
-                self.assertEqual(greeting_rate.status(db,at+timedelta(seconds=499))['retry_after_seconds'],1)
-                self.assertEqual(greeting_rate.claim(db,'other-job',at+timedelta(seconds=499))['state'],'rate_limited')
-                self.assertEqual(greeting_rate.claim(db,'other-job',at+timedelta(seconds=500))['used'],1)
-                db.execute('UPDATE settings SET value=? WHERE key=?',(json.dumps(dict(started_at=at.isoformat(),used=10)),greeting_rate.KEY))
-                self.assertEqual(greeting_rate.status(db,at+timedelta(seconds=450))['retry_after_seconds'],50)
+                self.assertEqual(greeting_rate.status(db,at+timedelta(seconds=499))['retry_after_seconds'],0)
+                self.assertEqual(greeting_rate.claim(db,'other-job',at+timedelta(seconds=499))['state'],'ready')
+                self.assertFalse(greeting_rate.status(db,at)['enabled'])
 
     def test_only_recent_coworker_skip_is_exempt(self):
         result=dict(skip=True,reason='coworker_within_or_exactly_7_days')

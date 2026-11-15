@@ -6,6 +6,7 @@ $ErrorActionPreference='Stop'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 . (Join-Path $PSScriptRoot 'boss-browser-binding.ps1')
+if(!$NoImage){Request-BossForeground}
 
 Add-Type -AssemblyName System.Drawing
 Add-Type @'

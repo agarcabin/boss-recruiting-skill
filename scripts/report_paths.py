@@ -1,5 +1,6 @@
 """Shared company/position names for daily recruiting reports."""
 from __future__ import annotations
+import workspace_paths
 
 import hashlib
 import re
@@ -39,4 +40,4 @@ def report_filename(profile: Path | str, filename: str | None = None) -> str:
 
 def report_path(root: Path, started_at: str, profile: Path | str) -> Path:
     day = datetime.fromisoformat(started_at).astimezone(CN_TZ)
-    return root / "自动投递记录" / f"{day.month}月{day.day}日" / report_filename(profile)
+    return workspace_paths.records_dir(root) / f"{day.month}月{day.day}日" / report_filename(profile)

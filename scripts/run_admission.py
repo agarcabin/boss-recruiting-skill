@@ -3,7 +3,7 @@ import contextlib,json,sqlite3
 from pathlib import Path
 import local_mutex
 
-BUILD_ID='1.4.9'
+BUILD_ID='1.4.10'
 
 def path(db):return str(Path(db.execute('PRAGMA database_list').fetchone()[2]).resolve())
 def key(db):return 'install-admission:'+path(db).casefold()

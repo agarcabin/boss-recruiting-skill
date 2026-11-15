@@ -1,4 +1,5 @@
 """Conservatively archive recognized old workbooks after complete record coverage."""
+import workspace_paths
 import argparse,hashlib,json,os,sqlite3,uuid
 from zipfile import BadZipFile
 from pathlib import Path
@@ -72,7 +73,7 @@ def migrate(db,root,apply=False):
     return outcomes
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--db',type=Path,default=ledger.DEFAULT_DB);p.add_argument('--root',type=Path,default=Path.home()/'Desktop');p.add_argument('--apply',action='store_true');a=p.parse_args()
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--db',type=Path,default=ledger.DEFAULT_DB);p.add_argument('--root',type=Path,default=workspace_paths.desktop_dir());p.add_argument('--apply',action='store_true');a=p.parse_args()
     with ledger.connect(a.db) as db:result=migrate(db,a.root,a.apply)
     print(json.dumps(dict(state='complete',items=result),ensure_ascii=False))
 if __name__=='__main__':main()

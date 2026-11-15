@@ -1,7 +1,7 @@
 param(
  [Parameter(Mandatory=$true)][string]$Target,
  [string]$Deadline,
- [ValidateSet('Invoke','SendText','Probe','Scroll','Key')][string]$Action='Invoke',
+ [ValidateSet('Invoke','SendText','Probe','Scroll','Reveal','Key')][string]$Action='Invoke',
  [string]$TextFile,
  [ValidateSet('Right','Left','Escape','Refresh')][string]$Key
 )
@@ -13,6 +13,7 @@ Add-Type -AssemblyName UIAutomationTypes
 . (Join-Path $PSScriptRoot 'boss-browser-binding.ps1')
 
 $t=Get-Content -LiteralPath $Target -Raw | ConvertFrom-Json
+if($Action -in @('Key','SendText')){Request-BossForeground}
 $root=Get-BossBrowserRoot ([long]$t.hwnd)
 $binding=Get-Content -LiteralPath $env:BOSS_BROWSER_BINDING -Raw -Encoding UTF8|ConvertFrom-Json
 if(!$t.browser_binding_id -or $t.browser_binding_id -ne $binding.binding_id){throw 'stale_boss_browser_target_rebind_required'}
@@ -52,7 +53,12 @@ elseif($Action -eq 'Scroll'){
  $scroll=$null
  if(!$element.TryGetCurrentPattern([System.Windows.Automation.ScrollPattern]::Pattern,[ref]$scroll)){throw 'scroll_not_supported'}
  Assert-BossBrowserTarget $element ([long]$t.hwnd)
- $scroll.Scroll([System.Windows.Automation.ScrollAmount]::NoAmount,[System.Windows.Automation.ScrollAmount]::LargeIncrement)
+ $scroll.Scroll([System.Windows.Automation.ScrollAmount]::NoAmount,[System.Windows.Automation.ScrollAmount]::SmallIncrement)
+}
+elseif($Action -eq 'Reveal'){
+ $scrollItem=$null
+ if(!$element.TryGetCurrentPattern([System.Windows.Automation.ScrollItemPattern]::Pattern,[ref]$scrollItem)){throw 'card_reveal_not_supported'}
+ $scrollItem.ScrollIntoView()
 }
 elseif($Action -eq 'Key'){
  if(!$Key){throw 'key_required'}

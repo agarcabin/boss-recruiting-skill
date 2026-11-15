@@ -26,14 +26,21 @@ from zipfile import ZipFile, ZIP_DEFLATED
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = 'release-manifest.json'
 SOURCE = 'update-source.json'
+BETA_BRANCH = 'codex/wecom-cloud-knowledge'
 TOP_FILES = {'SKILL.md', 'CHANGELOG.md', 'README.md', SOURCE}
-MANAGED_DIRS = {'scripts', 'references', 'agents'}
+MANAGED_DIRS = {'scripts', 'references', 'agents', 'docs'}
 SUFFIXES = {'.py', '.ps1', '.md', '.json', '.yaml', '.yml', '.txt'}
 LIMIT = 32 * 1024 * 1024
 
 
-def version_key(value: str) -> tuple[int, int, int]:
+def release_base_version(value: str) -> str:
+    """Return the numeric release version, preserving an optional beta channel."""
     value = value.removeprefix('v')
+    return value[:-5] if value.endswith('-beta') else value
+
+
+def version_key(value: str) -> tuple[int, int, int]:
+    value = release_base_version(value)
     if re.fullmatch(r'\d+\.\d+\.\d+', value):
         return tuple(map(int, value.split('.')))
     if re.fullmatch(r'\d+\.\d{2}', value):
@@ -57,6 +64,51 @@ def source(root: Path) -> dict:
             r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', config.get('repository', '')):
         raise ValueError('github_update_source_missing')
     return config
+
+
+def git_branch(root: Path) -> str:
+    try:
+        return subprocess.run(['git','-C',str(root),'branch','--show-current'],
+                              capture_output=True,text=True,encoding='utf-8',
+                              timeout=5,check=True).stdout.strip()
+    except (OSError,subprocess.SubprocessError):
+        return ''
+
+
+def release_channel(root: Path, config: dict | None = None) -> str:
+    """Resolve the update channel from packaged metadata or the checkout branch."""
+    config = config if config is not None else source(root)
+    branch = git_branch(root)
+    if branch:
+        return 'beta' if branch == BETA_BRANCH else 'stable'
+    channel = config.get('release_channel')
+    if channel in ('stable','beta'):
+        return channel
+    return 'stable'
+
+
+def is_beta_release(release: dict) -> bool:
+    tag = str(release.get('tag_name','')).removeprefix('v')
+    return tag.endswith('-beta')
+
+
+def release_matches_channel(release: dict, channel: str) -> bool:
+    if not isinstance(release,dict) or release.get('draft'):
+        return False
+    beta = is_beta_release(release)
+    return beta if channel == 'beta' else not beta and not release.get('prerelease')
+
+
+def select_release(releases, channel: str) -> dict | None:
+    """Select the newest release for one channel from a GitHub release list."""
+    if isinstance(releases,dict):
+        releases=[releases]
+    candidates=[release for release in releases if release_matches_channel(release,channel)]
+    if not candidates:
+        return None
+    return max(candidates,key=lambda release:(
+        version_key(str(release.get('tag_name',''))),
+        str(release.get('published_at') or release.get('created_at') or '')))
 
 
 def managed_name(name: str) -> bool:
@@ -131,35 +183,42 @@ def github_cli(args: list[str]) -> bytes:
 def check(root: Path) -> dict:
     config = source(root)
     local = installed_version(root)
+    channel = release_channel(root,config)
     if not config.get('private'):
         import update_transport
         return update_transport.check(root,config,local)
     try:
         if config.get('private'):
-            release = json.loads(github_cli(['api', f"repos/{config['repository']}/releases/latest"]))
+            endpoint = (f"repos/{config['repository']}/releases?per_page=100"
+                        if channel == 'beta' else f"repos/{config['repository']}/releases/latest")
+            payload = json.loads(github_cli(['api', endpoint]))
         else:
-            release = json.loads(fetch(f"https://api.github.com/repos/{config['repository']}/releases/latest", 2*1024*1024))
+            payload = json.loads(fetch(f"https://api.github.com/repos/{config['repository']}/releases/latest", 2*1024*1024))
     except HTTPError as exc:
         if exc.code == 404:
-            return dict(state='no_release', current_version=local, repository=config['repository'])
+            return dict(state='no_release', current_version=local, repository=config['repository'], release_channel=channel)
         raise
     except ValueError as exc:
         if str(exc).startswith('github_cli_error:') and 'HTTP 404' in str(exc):
-            return dict(state='no_release', current_version=local, repository=config['repository'])
+            return dict(state='no_release', current_version=local, repository=config['repository'], release_channel=channel)
         raise
-    return release_result(config,local,release)
+    release = select_release(payload,channel)
+    if release is None:
+        return dict(state='no_release', current_version=local, repository=config['repository'], release_channel=channel)
+    return release_result(config,local,release,channel)
 
 
-def release_result(config, local, release):
+def release_result(config, local, release, channel='stable'):
     if not isinstance(release,dict):
         raise ValueError('invalid_release_response')
-    if release.get('draft') or release.get('prerelease'):
-        raise ValueError('stable_release_required')
+    if not release_matches_channel(release,channel):
+        raise ValueError('beta_release_required' if channel == 'beta' else 'stable_release_required')
     version = release['tag_name'].removeprefix('v')
     newer = version_key(version) > version_key(local)
     result = dict(state='update_available' if newer else 'up_to_date', current_version=local,
                   latest_version=version, release_tag=release['tag_name'],
-                  repository=config['repository'], release_url=release['html_url'])
+                  repository=config['repository'], release_url=release['html_url'],
+                  release_channel=channel)
     if newer:
         names = [f'boss-recruiting-{version}.zip', f'boss-recruiting-{version}.zip.sha256',f'boss-recruiting-{version}.zip.sig']
         assets = {a['name']: a for a in release.get('assets', [])}
@@ -226,7 +285,7 @@ def unpack(data: bytes, expected_version: str, repository: str) -> dict[str, byt
     if config.get('repository') != repository or config.get('schema') != 'boss-skill-update/v1':
         raise ValueError('release_update_source_changed')
     match = re.search(rb'(?m)^  version: ["\']?([0-9.]+)["\']?\s*$', files['SKILL.md'])
-    if not match or match[1].decode() != expected_version:
+    if not match or match[1].decode() != release_base_version(expected_version):
         raise ValueError('release_skill_version_mismatch')
     return files
 

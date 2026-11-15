@@ -1,5 +1,5 @@
 """Produce encrypted, signed, privacy-scanned source and release archives."""
-import argparse,copy,hashlib,json,os,re,sys,uuid,zlib
+import argparse,copy,hashlib,json,os,re,subprocess,sys,uuid,zlib
 from pathlib import Path
 from zipfile import ZipFile,ZIP_DEFLATED
 import vault_crypto as crypto
@@ -29,6 +29,16 @@ def write_pin(root,record):
     crypto.atomic(Path(root)/'references/publisher-key.json',crypto.canonical(dict(algorithm='Ed25519',public_key=crypto.b64(public))))
     crypto.atomic(Path(root)/'scripts/publisher_pin.py',("PUBLIC_KEY_B64 = "+repr(crypto.b64(public))+"\n").encode())
     return public
+
+def release_version(root,base_version):
+    """Use a beta channel only for the WeCom migration worktree."""
+    try:
+        branch=subprocess.run(['git','-C',str(root),'branch','--show-current'],
+                              capture_output=True,text=True,encoding='utf-8',
+                              timeout=5,check=True).stdout.strip()
+    except (OSError,subprocess.SubprocessError):
+        branch=''
+    return base_version+'-beta' if branch=='codex/wecom-cloud-knowledge' else base_version
 
 def collect(root,include_user_projects=False):
     root=Path(root)
@@ -167,7 +177,8 @@ def sanitize_text(text,payload):
 def build(root,output,public_root,legacy_dir=None,include_user_projects=False):
     root=Path(root);output=Path(output);public_root=Path(public_root)
     from skill_update import installed_version
-    version=installed_version(root)
+    base_version=installed_version(root)
+    version=release_version(root,base_version)
     if public_root.exists() and any(public_root.iterdir()):raise ValueError('public_source_target_must_be_empty')
     record=issuer();payload=collect(root,include_user_projects);legacy=materials(legacy_dir)
     if not project_vault.vault_path(root).is_file():
@@ -185,10 +196,14 @@ def build(root,output,public_root,legacy_dir=None,include_user_projects=False):
         allowed.update(path.relative_to(root).as_posix() for path in (root/'references').glob('v*-policy.md'))
         allowed.add('scripts/project_source.py')
         allowed.add('scripts/test_release149.py')
-    for name in ('scripts','references','agents'):
+    if allowed is not None:
+        from skill_update import managed_name
+        allowed.update(p.relative_to(root).as_posix() for folder in ('scripts','references','agents','docs')
+                       for p in (root/folder).rglob('*') if p.is_file() and managed_name(p.relative_to(root).as_posix()))
+    for name in ('scripts','references','agents','docs'):
         for path in (root/name).rglob('*'):
             if not path.is_file() or path.suffix not in ('.py','.ps1','.md','.json','.yaml','.yml','.txt') or '__pycache__' in path.parts:continue
-            if path.name.startswith('test_') and path.name not in ('test_core_contract.py','test_release149.py'):continue
+            if path.name.startswith('test_') and path.name not in ('test_core_contract.py','test_release149.py','test_release1410.py','test_hr_job.py','test_local_startup.py','test_misjudgment_review.py'):continue
             if path.name in ('resume-extraction-test-results.md','resume-extraction-test-plan.md','uia-resume-diagnostic-report.md'):continue
             if name=='references' and path.name in ('recruiting-rules.json','project-vault.json','publisher-key.json'):continue
             relative=path.relative_to(root).as_posix()
@@ -214,10 +229,12 @@ def build(root,output,public_root,legacy_dir=None,include_user_projects=False):
         path=root/'references'/name
         content=path.read_text(encoding='utf-8-sig') if path.is_file() else fallback
         (public_root/'references'/name).write_text(sanitize_text(content,payload),encoding='utf-8')
-    for name in ('progress-window.md','project-operations.md','v'+version+'-policy.md'):
+    for name in ('progress-window.md','project-operations.md','v'+base_version+'-policy.md'):
         path=root/'references'/name
         if path.exists():(public_root/'references'/name).write_text(sanitize_text(path.read_text(encoding='utf-8-sig'),payload),encoding='utf-8')
-    (public_root/'update-source.json').write_bytes((root/'update-source.json').read_bytes())
+    source_config=json.loads((root/'update-source.json').read_text(encoding='utf-8-sig'))
+    source_config['release_channel']='beta' if version.endswith('-beta') else 'stable'
+    (public_root/'update-source.json').write_bytes(crypto.canonical(source_config))
     (public_root/'.gitignore').write_text('profiles/\nruntime/\n__pycache__/\n*.pyc\n*.dpapi\n*.sqlite3*\n*.xlsx\ndist/\n',encoding='utf-8')
     scan(public_root,payload['redactions'])
     files={p.relative_to(public_root).as_posix():p.read_bytes() for p in public_root.rglob('*') if p.is_file() and p.name!='.gitignore'}

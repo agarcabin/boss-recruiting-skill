@@ -123,6 +123,9 @@ def begin_message(db,run_id,candidate_id,index):
     run=ledger.run_row(db,run_id)
     if index not in (2,3): raise ValueError('first_message_uses_reserve')
     if recruiting_rules.run_greeting_mode(run)=='single': raise ValueError('single_greeting_disallows_followups')
+    if recruiting_rules.run_rules(run).get('coworker_notice_policy') == 1:
+        import candidate_checks
+        candidate_checks.require_resume(db,run_id,candidate_id)
     digest=ledger.run_candidate_hash(db,run_id,candidate_id)
     token=uuid.uuid4().hex; stamp=ledger.iso(ledger.now())
     db.execute('INSERT INTO message_attempts VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(run_id,candidate_hash,message_index) DO UPDATE SET token=excluded.token,status=excluded.status,updated_at=excluded.updated_at',(token,run_id,digest,index,'pending',run['generation'],stamp,stamp))
