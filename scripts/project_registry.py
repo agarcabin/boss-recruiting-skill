@@ -82,6 +82,7 @@ def encrypted_entry(root=None):
 def project_listing(root=None):
     root = Path(root) if root is not None else workspace_paths.configs_dir()
     if root.resolve() == workspace_paths.configs_dir().resolve():
+        workspace_paths.ensure_desktop_layout()
         import local_catalog
         catalog = local_catalog.scan(root)
         return dict(items=catalog['projects'], companies=catalog['companies'],
@@ -164,7 +165,7 @@ def read_project(profile: Path) -> dict[str, object]:
     company, position = fields.get("company", "").strip(), fields.get("position", "").strip()
     if not company or not position:
         raise ValueError("profile_identity_missing")
-    metadata_path = workspace_paths.metadata_path(profile)
+    metadata_path = workspace_paths.migrate_metadata(profile)
     metadata: dict[str, object] = {}
     if metadata_path.is_file():
         try:
@@ -190,7 +191,7 @@ def read_project(profile: Path) -> dict[str, object]:
 def register_project(profile: Path, project_id: str = "") -> dict[str, object]:
     profile = profile.resolve()
     project = read_project(profile)
-    metadata_path = workspace_paths.metadata_path(profile)
+    metadata_path = workspace_paths.migrate_metadata(profile)
     existing: dict[str, object] = {}
     if metadata_path.is_file():
         try:
@@ -207,6 +208,7 @@ def register_project(profile: Path, project_id: str = "") -> dict[str, object]:
     metadata.setdefault('origin','user')
     if project['provenance']['kind'] == 'local':
         metadata.update(origin='user', provenance=project['provenance'])
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     project.update(project_id=digest, metadata=str(metadata_path))
     return project

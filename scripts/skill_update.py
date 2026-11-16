@@ -75,9 +75,23 @@ def git_branch(root: Path) -> str:
         return ''
 
 
-def release_channel(root: Path, config: dict | None = None) -> str:
+def normalize_channel(value: str | None) -> str | None:
+    if value == 'main':
+        return 'stable'
+    return value
+
+
+def update_branch(config: dict, channel: str) -> str:
+    branches = config.get('branches') or {}
+    return str(branches.get(channel) or ('codex/wecom-cloud-knowledge' if channel == 'beta' else 'main'))
+
+
+def release_channel(root: Path, config: dict | None = None, requested: str | None = None) -> str:
     """Resolve the update channel from packaged metadata or the checkout branch."""
     config = config if config is not None else source(root)
+    requested = normalize_channel(requested)
+    if requested in ('stable', 'beta'):
+        return requested
     branch = git_branch(root)
     if branch:
         return 'beta' if branch == BETA_BRANCH else 'stable'
@@ -180,10 +194,11 @@ def github_cli(args: list[str]) -> bytes:
     return result.stdout
 
 
-def check(root: Path) -> dict:
+def check(root: Path, channel: str | None = None) -> dict:
     config = source(root)
     local = installed_version(root)
-    channel = release_channel(root,config)
+    channel = release_channel(root,config,channel)
+    branch = update_branch(config, channel)
     if not config.get('private'):
         import update_transport
         return update_transport.check(root,config,local)
@@ -196,15 +211,15 @@ def check(root: Path) -> dict:
             payload = json.loads(fetch(f"https://api.github.com/repos/{config['repository']}/releases/latest", 2*1024*1024))
     except HTTPError as exc:
         if exc.code == 404:
-            return dict(state='no_release', current_version=local, repository=config['repository'], release_channel=channel)
+            return dict(state='no_release', current_version=local, repository=config['repository'], release_channel=channel, update_branch=branch)
         raise
     except ValueError as exc:
         if str(exc).startswith('github_cli_error:') and 'HTTP 404' in str(exc):
-            return dict(state='no_release', current_version=local, repository=config['repository'], release_channel=channel)
+            return dict(state='no_release', current_version=local, repository=config['repository'], release_channel=channel, update_branch=branch)
         raise
     release = select_release(payload,channel)
     if release is None:
-        return dict(state='no_release', current_version=local, repository=config['repository'], release_channel=channel)
+        return dict(state='no_release', current_version=local, repository=config['repository'], release_channel=channel, update_branch=branch)
     return release_result(config,local,release,channel)
 
 
@@ -218,7 +233,7 @@ def release_result(config, local, release, channel='stable'):
     result = dict(state='update_available' if newer else 'up_to_date', current_version=local,
                   latest_version=version, release_tag=release['tag_name'],
                   repository=config['repository'], release_url=release['html_url'],
-                  release_channel=channel)
+                  release_channel=channel, update_branch=update_branch(config, channel))
     if newer:
         names = [f'boss-recruiting-{version}.zip', f'boss-recruiting-{version}.zip.sha256',f'boss-recruiting-{version}.zip.sig']
         assets = {a['name']: a for a in release.get('assets', [])}
@@ -321,8 +336,8 @@ def install(root,files,backups,database=None,runtime_source=None):
 
 
 
-def update(root: Path, backups: Path | None = None, database: Path | None = None) -> dict:
-    result = check(root)
+def update(root: Path, backups: Path | None = None, database: Path | None = None, channel: str | None = None) -> dict:
+    result = check(root, channel=channel)
     if result['state'] != 'update_available':
         return result
     with update_lock((backups or state_dir() / 'updates' / 'backups').parent):
@@ -339,6 +354,7 @@ def update(root: Path, backups: Path | None = None, database: Path | None = None
     return dict(state='updated', previous_version=result['current_version'], version=installed_version(root),
                 backup=str(backup), release_url=result['release_url'], reload_skill=True,
                 update_route=result.get('update_route'),download_route=result.get('download_route'),
+                release_channel=result.get('release_channel'),update_branch=result.get('update_branch'),
                 route_failures=result.get('route_failures',[]),download_route_failures=result.get('download_route_failures',[]))
 
 
@@ -350,6 +366,7 @@ def main() -> None:
     p.add_argument('--public-root',type=Path);p.add_argument('--legacy-dir',type=Path)
     p.add_argument('--include-user-projects',action='store_true',help='Explicitly include self-created projects in the encrypted snapshot.')
     p.add_argument('--archive',type=Path);p.add_argument('--signature',type=Path);p.add_argument('--runtime-source',type=Path);p.add_argument('--backup',type=Path)
+    p.add_argument('--channel', choices=('beta','stable','main'), help='Update channel: beta or the stable main line.')
     args = p.parse_args()
     try:
         if args.action == 'build':
@@ -359,7 +376,9 @@ def main() -> None:
         elif args.action=='install-local':
             if not args.archive or not args.signature:raise ValueError('archive_and_signature_required')
             data=args.archive.read_bytes();verify_archive(data,args.signature.read_bytes(),ROOT)
-            files=unpack(data,installed_version(ROOT),source(ROOT)['repository'])
+            with ZipFile(io.BytesIO(data)) as archive:
+                expected_version=json.loads(archive.read(MANIFEST).decode('utf-8'))['version']
+            files=unpack(data,expected_version,source(ROOT)['repository'])
             with update_lock(state_dir()/'updates'):
                 backup=install(args.root,files,state_dir()/'updates/backups',runtime_source=args.runtime_source)
             result=dict(state='installed',version=installed_version(args.root),backup=str(backup))
@@ -368,7 +387,7 @@ def main() -> None:
             if not args.backup:raise ValueError('backup_required')
             result=install_engine.recover(args.root,args.backup)
         else:
-            result = check(args.root) if args.action == 'check' else update(args.root)
+            result = check(args.root, channel=args.channel) if args.action == 'check' else update(args.root, channel=args.channel)
         print(json.dumps(result, ensure_ascii=False))
     except Exception as exc:
         print(json.dumps(dict(state='error', error=str(exc)), ensure_ascii=False))

@@ -16,7 +16,11 @@ def linked(path):
 
 
 def scan(root=None):
-    root = Path(root) if root is not None else workspace_paths.configs_dir()
+    if root is None:
+        workspace_paths.ensure_desktop_layout()
+        root = workspace_paths.configs_dir()
+    else:
+        root = Path(root)
     projects, companies, errors = [], [], []
     if not root.is_dir():
         return dict(root=str(root), projects=[], companies=[], errors=[], missing=True)

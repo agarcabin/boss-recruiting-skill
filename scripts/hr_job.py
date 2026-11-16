@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import workspace_paths
 
 
 class ConfigError(ValueError):
@@ -156,8 +157,7 @@ def parse(text):
 
 def metadata(profile):
     profile = Path(profile)
-    sidecar = profile.with_name('.'+profile.stem+'.project.json')
-    path = sidecar if sidecar.is_file() else profile.parent/'project.json'
+    path = workspace_paths.migrate_metadata(profile)
     return json.loads(path.read_text(encoding='utf-8-sig')) if path.is_file() else {}
 
 

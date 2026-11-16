@@ -12,6 +12,24 @@ import run_targets
 import startup_plan
 
 
+def requested_update_channel(prompt):
+    """Recognize explicit update-channel requests without guessing a channel."""
+    text = re.sub(r'\s+', '', str(prompt)).casefold()
+    if text in ('更新beta', 'beta更新', '更新测试版', '更新测试分支', '4beta'):
+        return 'beta'
+    if text in ('更新主版本', '更新正式版', '更新稳定版', '更新main', 'main更新', '4主版本'):
+        return 'stable'
+    return None
+
+
+def update_menu():
+    items = ['1. 更新 beta（codex/wecom-cloud-knowledge）', '2. 更新主版本（main）']
+    return dict(update_menu_title='选择更新通道', update_menu_items=items,
+                update_menu_text='选择更新通道\n\n' + '\n'.join(items),
+                update_channel_choices={'1': 'beta', '2': 'stable'},
+                update_channel_branches={'beta': 'codex/wecom-cloud-knowledge', 'stable': 'main'})
+
+
 def match_projects(text, projects):
     """Intersect company and job matches; ambiguity never picks a default job."""
     def names(project, key):
@@ -87,6 +105,13 @@ def prepare(prompt, db_path=None, root=None):
     common = dict(companies=catalog['companies'], config_root=catalog['root'],
                   config_errors=catalog['errors'], config_folder_missing=catalog['missing'],
                   project_count=len(catalog['companies']), position_count=len(projects))
+    channel = requested_update_channel(prompt)
+    if channel:
+        plan = dict(state='menu_action', menu_choice=4, next_actions=['run_skill_update'],
+                    update_channel=channel, update_branch=update_menu()['update_channel_branches'][channel])
+        plan.update(update_menu())
+        plan.update(common)
+        return plan
     if command in ('2', '菜单2', '菜单：2', '菜单:2', '查看所有', '查看所有企业', '查看本地企业', '查看已有项目'):
         plan.update(state='needs_selection', selection_level='company', matches=[],
                     next_actions=['show_local_companies'])
@@ -94,6 +119,8 @@ def prepare(prompt, db_path=None, root=None):
         action = {'3':'create_local_project', '4':'show_update_menu', '5':'test_environment', '6':'exit_greetings'}[command]
         plan = dict(state='menu_action', menu_choice=int(command), next_actions=[action],
                     template=str(Path(catalog['root'])/'岗位填写模板.md'))
+        if command == '4':
+            plan.update(update_menu())
     elif command in ('1', '继续', '继续上次', '继续上次项目'):
         selected = next((p for p in projects if latest and str(p['profile']) == str(latest.get('profile_path'))), None)
         if selected:
