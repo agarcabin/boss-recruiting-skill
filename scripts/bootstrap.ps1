@@ -130,5 +130,7 @@ if ($LASTEXITCODE -ne 0) { throw 'release_verification_failed' }
 if ($LASTEXITCODE -ne 0) { throw 'installation_failed_see_recovery_journal' }
 & $python -E -s (Join-Path $TargetRoot 'scripts\project_vault.py') status
 if ($LASTEXITCODE -ne 0) { throw 'project_status_failed' }
+& $python -E -s (Join-Path $TargetRoot 'scripts\workspace_paths.py') ensure-layout
+if ($LASTEXITCODE -ne 0) { throw 'desktop_layout_creation_failed' }
 # Fresh installs unlock only after selecting the encrypted group in the project list.
 Write-Output 'installation_complete'

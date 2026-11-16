@@ -6,7 +6,7 @@
 
 低于1.3.0的已安装版本首次升级到1.3.0时自动保存本机当前Windows用户的项目解锁信任，无需旧版本下载或密码。首次安装1.3.0不自动解锁；已有项目中显示“创新招聘组项目（已加密）”，选中后执行scripts/project_registry.py unlock --prompt。密码正确才解密并保存DPAPI本机信任；错误显示“密码错误，项目未解密。”，不解密也不保存信任；取消保持加密。仍可创建自用项目。已有信任保留。密码提示“你是谁？”。兼容迁移以本地安装状态为依据，属于便捷信任，不是强授权系统。
 
-菜单第4项运行 runtime/win-x64/python/python.exe scripts/skill_update.py update。check只检查。最新正式Release须同时包含ZIP、同名.zip.sha256、同名.zip.sig；先验签再解包，再检查清单、哈希、版本与路径。公开下载不需账号；直连失败可走update-source.json备用前缀，认证失败不信任该内容。失败保留原安装并显示原因，不无限重试。
+菜单第4项先选择更新通道，再运行 `runtime/win-x64/python/python.exe scripts/skill_update.py update --channel beta`（`codex/wecom-cloud-knowledge`）或 `... update --channel stable`（`main`）。不传通道只用于兼容旧入口。check只检查。每个通道的正式Release须同时包含ZIP、同名.zip.sha256、同名.zip.sig；先验签再解包，再检查清单、哈希、版本与路径。公开下载不需账号；直连失败可走update-source.json备用前缀，认证失败不信任该内容。失败保留原安装并显示原因，不无限重试。
 
 活动或暂停招聘运行须先结束；所有更新与新run创建共用数据库维护门。安装先备份、冻结历史岗位身份，整体替换通用代码和已解锁内置项目，SKILL.md最后更新；自建项目、历史运行、账本、资料和可用runtime保留。旧程序缺新build_id无法启动。断电导致维护门未释放时，使用已验签工具 skill_update.py recover --root <安装目录> --backup <本次备份目录>；只能恢复当前维护日志对应备份，不可任意选择历史备份。
 

@@ -66,7 +66,11 @@ class WindowsAdapter:
             _,_,fields=ledger.profile_check(Path(ledger.run_row(self.db,self.run)['profile_path']))
             display=observed.get('display_name')
             observed['name_mismatch']=bool(display and not all(fields[k] in display for k in ('company','position')))
-            observed['warning']='页面岗位/公司名称与skill不同，按人工选择继续' if observed['name_mismatch'] else None
+            target=f"{fields['company']} {fields['position']}"
+            observed['warning']=(
+                f"🔴注意：BOSS右上角显示“{display}”，与本轮目标“{target}”不一致；按用户选定岗位继续，不暂停。"
+                if observed['name_mismatch'] else None
+            )
             self.db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',('boss_page_job/'+self.run,json.dumps(observed,ensure_ascii=False)))
             self.page_job_recorded=True
         for attempt in range(3):

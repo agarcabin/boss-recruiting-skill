@@ -23,7 +23,8 @@ class LocalStartupTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        environment = patch.dict(os.environ, {'BOSS_DESKTOP_DIR': str(self.root), 'BOSS_STATE_DIR': str(self.root/'state')})
+        environment = patch.dict(os.environ, {'BOSS_DESKTOP_DIR': str(self.root), 'BOSS_STATE_DIR': str(self.root/'state'),
+                                              'BOSS_PROJECT_METADATA_DIR': str(self.root/'private-project-metadata')})
         environment.start()
         self.addCleanup(environment.stop)
         self.configs = workspace_paths.configs_dir()
@@ -35,6 +36,7 @@ class LocalStartupTests(unittest.TestCase):
         path.parent.mkdir(exist_ok=True)
         path.write_text(TEMPLATE.replace('{{岗位名称}}',position),encoding='utf-8')
         if meta:
+            workspace_paths.metadata_path(path).parent.mkdir(parents=True, exist_ok=True)
             workspace_paths.metadata_path(path).write_text(json.dumps(meta),encoding='utf-8')
         return path
 
@@ -118,6 +120,15 @@ class LocalStartupTests(unittest.TestCase):
         for choice, action in [('3','create_local_project'),('4','show_update_menu'),('5','test_environment'),('6','exit_greetings')]:
             self.assertEqual(self.plan(choice)['next_actions'],[action])
 
+    def test_update_menu_exposes_beta_and_stable_channels(self):
+        menu = self.plan('4')
+        self.assertEqual(menu['update_channel_choices'], {'1': 'beta', '2': 'stable'})
+        self.assertIn('更新 beta', menu['update_menu_text'])
+        self.assertIn('更新主版本', menu['update_menu_text'])
+        beta = self.plan('更新 beta')
+        self.assertEqual((beta['next_actions'], beta['update_channel'], beta['update_branch']),
+                         (['run_skill_update'], 'beta', 'codex/wecom-cloud-knowledge'))
+
     def test_saved_plan_is_rechecked_and_removed_job_does_not_start(self):
         path=self.job('企业甲','仓管')
         plan=self.plan('企业甲50个')
@@ -148,6 +159,30 @@ class LocalStartupTests(unittest.TestCase):
         with patch('sys.argv',['quick_start.py','--prompt','查看所有','--db',str(self.db)]),contextlib.redirect_stdout(result):
             quick_start.main()
         self.assertEqual(json.loads(result.getvalue())['companies'][0]['company'],'本地企业')
+
+    def test_project_listing_exposes_live_desktop_root(self):
+        self.job('01 本地企业','本地岗位')
+        listing = project_registry.project_listing()
+        self.assertEqual(Path(listing['config_root']).resolve(), self.configs.resolve())
+        self.assertEqual(listing['project_count'], 1)
+        self.assertEqual(listing['position_count'], 1)
+
+    def test_project_metadata_moves_out_of_hr_folder(self):
+        path = self.job('01 本地企业', '本地岗位')
+        legacy = workspace_paths.legacy_metadata_path(path)
+        legacy.write_text(json.dumps({'project_id': 'local-job'}), encoding='utf-8')
+        project_registry.project_listing()
+        self.assertFalse(legacy.exists())
+        target = workspace_paths.metadata_path(path)
+        self.assertTrue(target.is_file())
+        self.assertTrue(target.is_relative_to(Path(os.environ['BOSS_PROJECT_METADATA_DIR']).resolve()))
+        self.assertEqual(list(self.configs.rglob('*.json')), [])
+
+    def test_first_layout_contains_records_configs_and_template(self):
+        layout = workspace_paths.ensure_desktop_layout()
+        self.assertTrue(Path(layout['records']).is_dir())
+        self.assertTrue(Path(layout['configs']).is_dir())
+        self.assertTrue(Path(layout['template']).is_file())
 
 
 if __name__=='__main__':unittest.main()

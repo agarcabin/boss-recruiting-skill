@@ -16,6 +16,19 @@ import test_capture_control as fixtures
 
 
 class HighlightTests(unittest.TestCase):
+    def test_group_hits_use_distinct_colors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source=Path(tmp)/'resume.png';data=source.with_suffix('.json')
+            Image.new('RGB',(80,40),'white').save(source)
+            text='AB'
+            ocr=dict(lines=[dict(text=text,characters=[dict(text=t,score=.99,box=[10+i*25,5,30+i*25,30]) for i,t in enumerate(text)])])
+            data.write_text(json.dumps(ocr),encoding='utf-8')
+            result=dict(hits=[dict(word='A',group='A',quote='A'),dict(word='B',group='B',quote='B')],negative_hits=[])
+            marked=Path(resume_highlight.create(dict(image=str(source),ocr_json=str(data)),result))
+            with Image.open(marked) as rendered:
+                self.assertEqual(rendered.getpixel((10,5)),ImageColor.getrgb('#39FF14'))
+                self.assertEqual(rendered.getpixel((35,5)),ImageColor.getrgb('#00FFFF'))
+
     def test_fluorescent_spans_keep_text_and_source_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             source=Path(tmp)/'resume.png';data=source.with_suffix('.json')

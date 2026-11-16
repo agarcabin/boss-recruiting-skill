@@ -5,7 +5,8 @@ from pathlib import Path
 import re
 
 
-POSITIVE_COLOR='#39FF14'
+GROUP_COLORS={'A':'#39FF14','B':'#00FFFF'}
+POSITIVE_COLOR=GROUP_COLORS['A']
 NEGATIVE_COLOR='#FF3131'
 HIGHLIGHT_ALPHA=64
 
@@ -17,6 +18,7 @@ def spans(text, hits, negative=False):
         quote=hit.get('quote','')
         if not word or not quote:
             continue
+        group=str(hit.get('group','')).upper() or None
         for context in re.finditer(re.escape(quote), text):
             for term in re.finditer(re.escape(word),quote,re.I):
                 prefix=quote[max(0,term.start()-14):term.start()]
@@ -27,7 +29,7 @@ def spans(text, hits, negative=False):
                     continue
                 if re.match(r'(?:工作)?(?:经验)?(?:没有|不足|为零|不具备|无经验)',suffix):
                     continue
-                result.append(dict(word=word,start=context.start()+term.start(),end=context.start()+term.end(),negative=negative))
+                result.append(dict(word=word,group=group,start=context.start()+term.start(),end=context.start()+term.end(),negative=negative))
     return result
 
 
@@ -65,6 +67,12 @@ def geometry(ocr, targets):
     return located,missing
 
 
+def color_for(item):
+    if item.get('negative'):
+        return NEGATIVE_COLOR
+    return GROUP_COLORS.get(str(item.get('group','')).upper(), POSITIVE_COLOR)
+
+
 def create(evidence, result):
     from PIL import Image,ImageDraw,ImageFont,ImageColor
     source=Path(evidence['image']);data=Path(evidence['ocr_json'])
@@ -77,9 +85,10 @@ def create(evidence, result):
     for negative,key in ((False,'hits'),(True,'negative_hits')):
         for h in result.get(key,[]):
             word=h.get('word') or h.get('company')
-            if word and word not in found:missing.append(dict(word=word,negative=negative,reason='无法精确定位'))
+            if word and word not in found:
+                missing.append(dict(word=word,group=h.get('group'),negative=negative,reason='无法精确定位'))
     original=Image.open(source).convert('RGB')
-    legend=list(dict.fromkeys((m['word'],m['negative']) for m in missing))
+    legend=list(dict.fromkeys((m['word'],m.get('group'),m['negative']) for m in missing))
     canvas=Image.new('RGB',(original.width+380 if legend else original.width,max(original.height,50+32*len(legend))),'white')
     canvas.paste(original,(0,0))
     try:font=ImageFont.truetype('C:/Windows/Fonts/msyh.ttc',18)
@@ -87,14 +96,14 @@ def create(evidence, result):
     overlay=Image.new('RGBA',canvas.size,(0,0,0,0));draw=ImageDraw.Draw(overlay)
     # A translucent fluorescent fill preserves the text; negative spans go last.
     for item in sorted(located,key=lambda x:x['negative']):
-        color=ImageColor.getrgb(NEGATIVE_COLOR if item['negative'] else POSITIVE_COLOR)
+        color=ImageColor.getrgb(color_for(item))
         for box in item['boxes']:
             draw.rectangle(box,fill=(*color,HIGHLIGHT_ALPHA),outline=(*color,255),width=3)
     canvas=Image.alpha_composite(canvas.convert('RGBA'),overlay).convert('RGB')
     draw=ImageDraw.Draw(canvas)
-    for n,(word,negative) in enumerate(legend):
+    for n,(word,group,negative) in enumerate(legend):
         position=(original.width+12,16+n*32);label=word+'（无法精确定位）'
-        draw.rectangle(draw.textbbox(position,label,font=font),fill=NEGATIVE_COLOR if negative else POSITIVE_COLOR)
+        draw.rectangle(draw.textbbox(position,label,font=font),fill=color_for(dict(group=group,negative=negative)))
         draw.text(position,label,fill='#17212B',font=font)
     target=source.with_name(source.stem+'-marked.png');canvas.save(target)
     meta=dict(schema='resume-highlights/v1',source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
