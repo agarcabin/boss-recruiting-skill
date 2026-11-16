@@ -102,9 +102,9 @@ def release_from_page(data, repository):
     return dict(tag_name=tag, draft=False, prerelease=False, html_url=urls[0], assets=assets)
 
 
-def check(root, config, local):
+def check(root, config, local, requested_channel=None):
     import skill_update as updater
-    channel = updater.release_channel(root,config)
+    channel = updater.release_channel(root,config,requested_channel)
     errors = []
     only_not_found = True
     for route in routes(root, 'metadata'):
