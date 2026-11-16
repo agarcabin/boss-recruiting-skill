@@ -201,7 +201,7 @@ def check(root: Path, channel: str | None = None) -> dict:
     branch = update_branch(config, channel)
     if not config.get('private'):
         import update_transport
-        return update_transport.check(root,config,local)
+        return update_transport.check(root,config,local,channel)
     try:
         if config.get('private'):
             endpoint = (f"repos/{config['repository']}/releases?per_page=100"
