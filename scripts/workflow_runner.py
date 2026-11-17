@@ -12,7 +12,7 @@ from workflow_paths import workflow_dir
 
 
 AI_HANDOFFS={'assessment','misjudgment_review','summary','followups','overall_review'}
-WAIT_STATES={'paused','login_required','needs_page','rate_limited','short_view_wait'}
+WAIT_STATES={'paused','login_required','needs_page','rate_limited','short_view_wait','notice_wait'}
 
 
 def phase_activity(phase,data):
@@ -100,7 +100,7 @@ class Runner:
                     candidate=self.data.get('candidate'),request_file=self.data.get('request_file'),
                     response_file=self.data.get('response_file'),visits=self.data.get('visits',0),
                     warnings=self.data.get('warnings',[]),error=self.data.get('error'),
-                    rate_limit=self.data.get('rate_limit'),short_view_wait=self.data.get('short_view_wait'),
+                    rate_limit=self.data.get('rate_limit'),short_view_wait=self.data.get('short_view_wait'),notice_wait=self.data.get('notice_wait'),
                     last_result=self.data.get('last_result'),exports=self.data.get('exports',[]))
 
     def handoff(self,kind,payload):
@@ -163,6 +163,15 @@ class Runner:
             candidate=self.data.pop('prefetched',None) or self.adapter.select(self.data.get('processed',[]))
             if candidate is None:return self.status('needs_page')
             self.data.update(candidate=candidate,warnings=[],attempts=0)
+            messages=[]
+            adjustment=False
+            job=self.db.execute('SELECT value FROM settings WHERE key=?',('boss_page_job/'+self.run,)).fetchone()
+            if job and not self.data.get('page_job_notice_done'):
+                job=json.loads(job[0])
+                if job.get('name_mismatch'):
+                    messages.append(job['warning'])
+                    adjustment=True
+                    self.data['page_job_notice_done']=True
             if recruiting_rules.run_rules(run).get('page_layout_policy') and hasattr(self.adapter,'filter_state'):
                 observed=self.adapter.filter_state()
                 signature=json.dumps(observed,ensure_ascii=False,sort_keys=True)
@@ -171,11 +180,17 @@ class Runner:
                     message=('🔴注意：还没有进行筛选。' if observed.get('state')=='read' and observed.get('count',0)==0
                              else '无法确认筛选状态，请查看当前BOSS页面。' if observed.get('state')!='read' else None)
                     if message:
-                        import hashlib
-                        self.data['filter_notice']=dict(message=message,notice_id=hashlib.sha256((self.run+signature).encode()).hexdigest(),
-                            instruction='在当前对话输出message后返回notice_id和displayed:true，然后自动继续，无需用户确认。')
-                        self.phase='filter_notice'
-                        return self.handoff('filter_notice',self.data['filter_notice'])
+                        messages.append(message)
+                        adjustment=adjustment or (observed.get('state')=='read' and observed.get('count')==0)
+            if messages:
+                import hashlib,notice_wait
+                message='\n'.join(messages+([notice_wait.MESSAGE] if adjustment else []))
+                notice_id=hashlib.sha256((self.run+message+str(self.data.get('filter_signature'))).encode()).hexdigest()
+                self.data['filter_notice']=dict(message=message,notice_id=notice_id,wait_seconds=30 if adjustment else 0,
+                    instruction='在当前对话实际输出完整message后返回notice_id和displayed:true；程序从展示回执开始等待30秒，收到继续时调用ledger control --action resume跳过等待，无需确认。')
+                if adjustment:notice_wait.prepare(self.db,self.run,notice_id)
+                self.phase='filter_notice'
+                return self.handoff('filter_notice',self.data['filter_notice'])
             self.phase='open';return None
         if phase=='filter_notice':
             pending=self.handoff('filter_notice',self.data['filter_notice'])
@@ -183,8 +198,23 @@ class Runner:
             if not answer:return pending
             if answer.get('notice_id')!=self.data['filter_notice']['notice_id'] or answer.get('displayed') is not True:
                 raise ValueError('filter_notice_not_displayed')
+            notice=self.data['filter_notice']
             for key in ('request_file','response_file','handoff_kind','filter_notice'):self.data.pop(key,None)
+            if notice.get('wait_seconds'):
+                self.data['notice_wait']=dict(notice_id=notice['notice_id'])
+                self.phase='notice_wait'
+                return None
             self.phase='open';return None
+        if phase=='notice_wait':
+            import notice_wait
+            seconds=notice_wait.remaining(self.db,self.run,self.data['notice_wait']['notice_id'])
+            self.data['notice_wait']['remaining_seconds']=seconds
+            if seconds:return self.status('notice_wait')
+            self.data.pop('notice_wait',None)
+            self.data.pop('candidate',None)
+            self.data.pop('prefetched',None)
+            self.adapter.page_job_recorded=False
+            self.phase='select';return None
         if phase=='open':
             list_filter=bool(recruiting_rules.run_rules(run).get('list_prefilter'))
             if mode!='worker_resume' and not list_filter:self.adapter.open(candidate,mode)
@@ -296,8 +326,8 @@ class Runner:
             self.data['coworker_result']=result
             if result.get('notice_required') and not result.get('notice_confirmed'):
                 notice = dict(notice_id=candidate_checks.notice_id(self.db,self.run,cid,observation),
-                    message='跳过了同事沟通记录判断', candidate=candidate,
-                    reason=result.get('unreadable_reason', observation.get('evidence')),
+                    message='同事沟通记录判断超过5秒，已跳过该判断' if observation.get('evidence')=='coworker_timeout_5s' else '跳过了同事沟通记录判断', candidate=candidate,
+                    reason=observation.get('evidence') if observation.get('evidence')=='coworker_timeout_5s' else result.get('unreadable_reason', observation.get('evidence')),
                     instruction='先在当前对话逐人输出message、候选人及简短原因，再返回notice_id和displayed:true；不需要用户再次许可。')
                 pending = self.handoff('coworker_notice', notice)
                 answer = self.response()
@@ -322,7 +352,9 @@ class Runner:
             facts=dict(self.data['facts'])
             rules=recruiting_rules.run_rules(run)
             if (recruiting_rules.is_domain(rules) or rules.get('list_prefilter')) and facts.get('read_complete') is not True:
-                self.record_payload(dict(facts,decision='review',overall_score=0,electronic_resume_enabled=False,hard_requirements=False,pros='正文未完整读取，尚未完成评分',cons='保留实际材料，未发送'))
+                detail=facts.get('resume_save_error') or facts.get('read_warning') or facts.get('uia_read_warning') or '采集结果未确认完整，需重新读取'
+                if 'resume_scroll_target_missing_after_layer_fallbacks' in str(detail):detail='未找到简历正文的可滚动区域，无法完成全文采集'
+                self.record_payload(dict(facts,decision='review',overall_score=0,electronic_resume_enabled=False,hard_requirements=False,pros='正文未完整读取，尚未完成评分',cons='保留实际材料，未发送；原因：'+str(detail)))
                 self.phase='finish';return None
             if hr_timing:
                 result=recruiting_rules.evaluate(rules,facts,run['min_score'])
@@ -509,7 +541,7 @@ class Runner:
                 if key in browse['seen']:
                     self.adapter.close();navigation=None;browse=dict(misses=0,seen=[])
                 else:browse['seen'].append(key)
-            self.data=dict(processed=processed,visits=count,last_result=completed,worker_browse=browse,filter_signature=self.data.get('filter_signature'))
+            self.data=dict(processed=processed,visits=count,last_result=completed,worker_browse=browse,filter_signature=self.data.get('filter_signature'),page_job_notice_done=self.data.get('page_job_notice_done'))
             if navigation and navigation.get('next_candidate'):
                 self.data['prefetched']=dict(navigation['next_candidate'],already_open=True)
             self.phase='select';return None
@@ -606,4 +638,9 @@ def main():
         finally:db.execute('DELETE FROM workflow_owner WHERE run_id=? AND pid=?',(args.run,os.getpid()))
 
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    try:main()
+    except Exception:
+        import error_alert
+        error_alert.play()
+        raise

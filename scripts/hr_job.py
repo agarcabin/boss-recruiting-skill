@@ -11,7 +11,7 @@ class ConfigError(ValueError):
 
 
 HEADINGS = ('一、列表卡片', '二、电子简历', '三、其他配置')
-SETTINGS = ('单简历查看时间（为期望平均值）', '查看十人后休息', '同事几天以上可打招呼', '三句招呼（关闭为单句）')
+SETTINGS = ('单简历查看时间（为期望平均值）', '查看十人后休息', '同事几天以上可打招呼', '三句招呼（关闭为单句）', 'AI总评')
 SETTING_ALIASES = {
     '单简历查看时间（不足时补足）': SETTINGS[0],
     '单简历查看时间不低于': SETTINGS[0],
@@ -138,12 +138,15 @@ def parse(text):
         settings[label] = match[2]
     settings.setdefault(SETTINGS[0], '30 秒')
     settings.setdefault(OVERALL_REVIEW, '开')
+    settings.setdefault('AI总评', '关')
     if set(settings) != set(SETTINGS) | {OVERALL_REVIEW}:
         raise ConfigError('请填写其他配置中的设置项')
     if settings[SETTINGS[3]] not in ('开', '关'):
         raise ConfigError('三句招呼请填写“开”或“关”')
     if settings[OVERALL_REVIEW] not in ('开', '关'):
         raise ConfigError(OVERALL_REVIEW+'请填写“开”或“关”')
+    if settings['AI总评'] not in ('开', '关'):
+        raise ConfigError('AI总评请填写“开”或“关”')
     config.update(average_seconds=duration(settings[SETTINGS[0]], SETTINGS[0]),
                   rest_seconds=duration(settings[SETTINGS[1]], SETTINGS[1]),
                   coworker_days=duration(settings[SETTINGS[2]], SETTINGS[2], True),
@@ -152,6 +155,7 @@ def parse(text):
     config['coworker_zero_disables'] = True
     config['rest_after_greetings'] = 5
     config['overall_review'] = settings[OVERALL_REVIEW] == '开'
+    config['ai_total_review'] = settings['AI总评'] == '开'
     return config
 
 
@@ -179,9 +183,9 @@ def snapshot(profile):
                 hr_config_sha256=hashlib.sha256(json.dumps(config, ensure_ascii=False, sort_keys=True).encode()).hexdigest(),
                 namespace=fields(profile, text)['candidate_namespace'], policy='hr_job', mode='resume',
                 greeting_mode=config['greeting_mode'], browser_target='codex_iab', pdf_required=False,
-                list_prefilter=True, ai_pros_cons=True, short_view_wait=True, coworker_skip_wait_exempt=True,
+                list_prefilter=True, ai_pros_cons=config['ai_total_review'], short_view_wait=True, coworker_skip_wait_exempt=True,
                 release_policy=1410, current_rules=20261115, view_wait_policy=3, coworker_notice_policy=1,
-                csv_reports=True, ocr_highlights=True, page_layout_policy=1)
+                csv_reports=False, ocr_highlights=True, page_layout_policy=1)
 
 
 def match(config, text, grouped):

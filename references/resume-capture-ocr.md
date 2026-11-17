@@ -42,7 +42,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 
 `PythonPath` 用于长图拼接和 OCR；`SafetyPythonPath` 仅用于调用 `run_safety.py` 检查同一账本、运行号和 generation。默认两者相同。若便携 Python 的用户数据目录与启动运行的 Python 隔离，显式将 `SafetyPythonPath` 指向启动运行时使用的 Python，并继续把 `PythonPath` 指向便携运行时；可使用managed_helper.py登记helper，便于结束时取消。
 
-脚本只在当前 `c-resume` Document 的有限 UIA 范围内寻找简历滚动容器。优先使用 `ClassName=resume-detail-wrap`，并兼容用户批注所指 `div#resume` 在 UIA 中映射为 `AutomationId=resume` 的页面；若正文节点自身不支持 ScrollPattern，再检查其有限祖先链中唯一可滚动的 `resume-detail-wrap`。必要时也接受 c-resume Document 本身支持纵向 ScrollPattern。多个同优先级候选或找不到滚动容器时记录明确原因，不滚动推荐列表。
+脚本只在当前 `c-resume` Document 的有限 UIA 范围内寻找简历滚动容器。优先使用 `ClassName=resume-detail-wrap`，并兼容用户批注所指 `div#resume` 在 UIA 中映射为 `AutomationId=resume` 的页面；若正文节点自身不支持 ScrollPattern，再检查其有限祖先链中唯一可滚动的 `resume-detail-wrap`。必要时也接受 c-resume Document 本身支持纵向 ScrollPattern。没有滚动区域时不再直接判失败，而是先采集单屏候选；本地OCR看到“牛人”即确认到页底，没看到则待复核。
 
 UIA 读取及 Win32 截图不得调用 `SetFocus()` 或强制把 BOSS 切到前台。先按 UIA 页面层级和实际 URL 找正确 c-resume Document；屏幕当前可见时用 Win32 截图。若该文档仍无可访问正文，保留页面状态并 review/不发送，不能使用DOM/网页脚本或强制聚焦；可按控制策略有界恢复页面。
 

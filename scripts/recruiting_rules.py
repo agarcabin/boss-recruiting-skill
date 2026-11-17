@@ -42,7 +42,7 @@ def snapshot(profile: Path, fields: dict, greeting_mode: str | None = None) -> d
         rules.update(worker_deduction_version=1, worker_negative_keywords=['服务员','厨师','前台','传菜','销售','经理'], worker_negative_points=10, worker_min_score=60)
         rules['worker_keywords'] = list(dict.fromkeys(rules.get('worker_keywords', rules.get('worker_advantage', []) + rules.get('worker_expectation', []))))
     rules.update(release_policy=1410, view_wait_policy=2, coworker_notice_policy=1,
-                 csv_reports=True, ocr_highlights=True, page_layout_policy=1)
+                 csv_reports=False, ocr_highlights=True, page_layout_policy=1)
     return rules
 
 

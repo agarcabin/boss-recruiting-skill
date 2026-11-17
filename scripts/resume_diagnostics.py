@@ -50,6 +50,9 @@ def record(db, run_id, candidate_id, stage, error,event='resume_save_failed'):
                         ensure_ascii=False)
     if not db.execute("SELECT 1 FROM run_audit WHERE run_id=? AND event=? AND detail=?",
                       (run_id,event,detail)).fetchone():
+        if event!='resume_interrupted':
+            import error_alert
+            error_alert.play()
         db.execute('INSERT INTO run_audit(run_id,at,event,detail) VALUES (?,?,?,?)',
                    (run_id, ledger.iso(ledger.now()),event,detail))
 

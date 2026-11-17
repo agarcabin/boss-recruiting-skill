@@ -18,6 +18,7 @@ def update(text):
         '连续招呼五次后额外休息：'+seconds(before['rest_seconds'])+' 秒',
         '同事几天以上可打招呼（填 0 为不判断同事）：'+seconds(before['coworker_days'])+' 天',
         '三句招呼（关闭为单句）：'+('开' if before['greeting_mode']=='triple' else '关'),
+        'AI总评：'+('开' if before.get('ai_total_review') else '关'),
         '减分至合格线后AI整体复盘：'+('开' if before['overall_review'] else '关')))
     prefix, separator, _ = text.partition('## 三、其他配置')
     if not separator:raise ValueError('other_config_section_missing')
@@ -26,6 +27,6 @@ def update(text):
     for stage in ('list','resume'):
         for key in ('groups','terms','negative'):
             if before[stage][key] != after[stage][key]:raise ValueError('migration_changed_vocabulary')
-    for key in ('position','minimum_seconds','rest_seconds','coworker_days','greeting_mode','overall_review'):
+    for key in ('position','minimum_seconds','rest_seconds','coworker_days','greeting_mode','ai_total_review','overall_review'):
         if before[key] != after[key]:raise ValueError('migration_changed_configuration')
     return result

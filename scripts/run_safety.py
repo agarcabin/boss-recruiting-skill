@@ -107,6 +107,7 @@ def process_birth(pid,terminate=False,expected=None):
     handle=kernel.OpenProcess(0x1000|0x100000|(1 if terminate else 0),False,pid)
     if not handle: raise ProcessLookupError(pid)
     try:
+        if kernel.WaitForSingleObject(handle,0)==0: raise ProcessLookupError(pid)
         times=[ctypes.c_uint64() for _ in range(4)]
         if not kernel.GetProcessTimes(handle,*[ctypes.byref(x) for x in times]): raise OSError('GetProcessTimes')
         birth=times[0].value/10000000

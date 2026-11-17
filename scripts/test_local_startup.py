@@ -91,7 +91,7 @@ class LocalStartupTests(unittest.TestCase):
 
     def test_company_prefix_and_parenthetical_job_alias(self):
         path=self.job('01 示例甲集团','巡检（普工）')
-        self.job('02 示例甲集团分厂','装配工')
+        self.job('02 示例甲集团分厂','ExampleEntity58')
         self.assertEqual(self.plan('帮我打示例甲巡检50个')['profile'],str(path.resolve()))
 
     def test_malformed_retired_and_hidden_entries_never_start(self):

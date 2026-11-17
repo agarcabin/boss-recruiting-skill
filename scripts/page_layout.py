@@ -30,10 +30,38 @@ def prepare(adapter):
         raise LayoutBlocked(str(exc)) from exc
 
 
-def _prepare(adapter):
+ZOOM_LEVELS = (90, 80, 70, 60, 50)
+
+
+def ensure_sidebar_hidden(chat_title):
+    if not chat_title:
+        raise LayoutBlocked("缺少当前聊天标题，无法核验侧边栏")
+    result = subprocess.run(powershell_host.command(Path(__file__).with_name("collapse-chat-sidebar.ps1"), "-ChatTitle", chat_title), capture_output=True, timeout=30, **hidden_options())
+    if result.returncode:
+        raise LayoutBlocked("隐藏侧边栏失败：" + decode_output(result.stderr)[-600:])
+    receipt = json.loads(decode_output(result.stdout))
+    if receipt.get("state") != "collapsed" or receipt.get("chat_title") != chat_title:
+        raise LayoutBlocked("侧边栏隐藏状态未确认")
+    return receipt
+
+
+def read_layout(adapter):
     layout=adapter.query('LayoutState')
     if layout.get('state')!='read':
-        raise ValueError('无法确认页面右侧控件是否完整显示，请检查当前BOSS列表页面。')
+        reason=layout.get('reason','unknown')
+        messages={
+            'filter_control_not_found':'未识别到筛选控件',
+            'filter_control_not_unique':'识别到多个筛选控件，无法确定当前控件',
+        }
+        raise LayoutBlocked('页面控件识别失败：'+messages.get(reason,reason)+'；尚未判断页面是否被截断。')
+    return layout
+
+
+def _prepare(adapter):
+    binding = json.loads(Path(os.environ["BOSS_BROWSER_BINDING"]).read_text(encoding="utf-8-sig"))
+    receipt = ensure_sidebar_hidden(binding.get("chat_title"))
+    adapter.db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", ("sidebar_check/"+adapter.run, json.dumps(receipt)))
+    layout=read_layout(adapter)
     if layout.get('fits'):return
     state=query()
     if state.get('state')!='read':
@@ -42,7 +70,7 @@ def _prepare(adapter):
     saved=adapter.db.execute('SELECT value FROM settings WHERE key=?',(key,)).fetchone()
     record=json.loads(saved[0]) if saved else dict(original=original,binding_id=state['binding_id'],
         binding_file=os.environ.get('BOSS_BROWSER_BINDING'))
-    for target in (90,80):
+    for target in ZOOM_LEVELS:
         if target>=original:continue
         # Persist restoration information before dispatch, including a crash
         # between a successful zoom and recording its response.
@@ -54,8 +82,8 @@ def _prepare(adapter):
             adapter.db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',(key,json.dumps(record)))
         if changed.get('state')!='read' or abs(changed['percent']-target)>.1:
             raise ValueError('无法确认BOSS页面缩放成功，已暂停，未使用旧坐标继续操作。')
-        if adapter.query('LayoutState').get('fits'):return
-    raise ValueError('BOSS页面缩放至80%仍无法完整显示右侧控件，请扩大窗口后继续。')
+        if read_layout(adapter).get('fits'):return
+    raise ValueError('BOSS页面已按90%、80%、70%、60%、50%逐级检查（跳过不低于当前比例的档位），仍无法完整显示右侧控件，请扩大窗口后继续。')
 
 
 def restore(db, run):

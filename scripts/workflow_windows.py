@@ -6,6 +6,14 @@ from windows_process import hidden_options
 from workflow_paths import workflow_dir
 
 
+def resume_full_text(data, ocr_text=''):
+    """Keep all candidate sections, even when the main body is empty."""
+    parts=[ocr_text]+[data.get(key,'') for key in (
+        'keyword_text','resume_text','overview_text','expectation_text',
+        'advantage_text','experience_text','education_text','project_text')]
+    return '\n'.join(dict.fromkeys(part.strip() for part in parts if isinstance(part,str) and part.strip()))
+
+
 class WindowsAdapter:
     def __init__(self,db,run,root,hwnd=None,allow_ocr=True):
         self.db,self.run,self.root,self.hwnd=db,run,Path(root),hwnd
@@ -13,12 +21,24 @@ class WindowsAdapter:
         self.allow_ocr=allow_ocr;self.observations={};self.detail_open=False
         self.folder=workflow_dir(run)
 
+    def operation_timeout(self,default):
+        deadline=getattr(self,'operation_deadline',None)
+        if deadline is None:return default
+        remaining=deadline-time.monotonic()
+        if remaining<=0:raise subprocess.TimeoutExpired('coworker_check',10)
+        return min(default,remaining)
+
+    def operation_sleep(self,seconds):
+        if self.operation_timeout(seconds)<seconds:
+            raise subprocess.TimeoutExpired('coworker_check',10)
+        time.sleep(seconds)
+
     def ps(self,name,*args):
         command=powershell_host.command(Path(__file__).with_name(name),*args)
-        done=subprocess.run(command,capture_output=True,text=True,encoding='utf-8-sig',errors='replace',timeout=15,**hidden_options())
+        done=subprocess.run(command,capture_output=True,text=True,encoding='utf-8-sig',errors='replace',timeout=self.operation_timeout(15),**hidden_options())
         if done.returncode and name=='workflow-uia.ps1' and 'boss_document_unavailable' in done.stderr:
-            time.sleep(.2)
-            done=subprocess.run(command,capture_output=True,text=True,encoding='utf-8-sig',errors='replace',timeout=15,**hidden_options())
+            self.operation_sleep(.2)
+            done=subprocess.run(command,capture_output=True,text=True,encoding='utf-8-sig',errors='replace',timeout=self.operation_timeout(15),**hidden_options())
         if done.returncode:raise RuntimeError(done.stderr[-1800:])
         return json.loads(done.stdout)
 
@@ -36,6 +56,8 @@ class WindowsAdapter:
         try:
             command=powershell_host.command(Path(__file__).with_name('guarded-uia-action.ps1'),'-Target',path,'-Action',action)
             if key:command+=['-Key',key]
+            if getattr(self,'operation_deadline',None) is not None:
+                return safe_action.dispatch(self.db,self.run,None,command,timeout=self.operation_timeout(8))
             return safe_action.dispatch(self.db,self.run,None,command)
         finally:path.unlink(missing_ok=True)
 
@@ -68,7 +90,7 @@ class WindowsAdapter:
             observed['name_mismatch']=bool(display and not all(fields[k] in display for k in ('company','position')))
             target=f"{fields['company']} {fields['position']}"
             observed['warning']=(
-                f"🔴注意：BOSS右上角显示“{display}”，与本轮目标“{target}”不一致；按用户选定岗位继续，不暂停。"
+                f"🔴注意：BOSS右上角显示“{display}”，与本轮目标“{target}”不一致。"
                 if observed['name_mismatch'] else None
             )
             self.db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',('boss_page_job/'+self.run,json.dumps(observed,ensure_ascii=False)))
@@ -111,6 +133,29 @@ class WindowsAdapter:
             raise ValueError('resume_not_opened')
 
     def colleague(self,candidate,mode):
+        previous=getattr(self,'operation_deadline',None)
+        started=time.monotonic()
+        self.operation_deadline=started+5
+        try:
+            result=self._colleague(candidate,mode)
+            if time.monotonic()>=self.operation_deadline:
+                raise subprocess.TimeoutExpired('coworker_check',5)
+            return dict(result,elapsed_seconds=round(time.monotonic()-started,3))
+        except subprocess.TimeoutExpired:
+            return dict(state='unavailable',lookup_completed=False,
+                evidence='coworker_timeout_5s',timeout_seconds=5,
+                elapsed_seconds=round(time.monotonic()-started,3))
+        except (OSError,RuntimeError,ValueError):
+            elapsed=time.monotonic()-started
+            if elapsed>=5:
+                return dict(state='unavailable',lookup_completed=False,
+                    evidence='coworker_timeout_5s',timeout_seconds=5,
+                    elapsed_seconds=round(elapsed,3))
+            raise
+        finally:
+            self.operation_deadline=previous
+
+    def _colleague(self,candidate,mode):
         if mode=='card':
             folder=self.folder/('card-'+uuid.uuid4().hex)
             args=['-WindowHandle',str(self.hwnd),'-CandidateName',candidate['candidate_name'],'-CardRuntime',candidate['card_runtime'],'-OutputDirectory',str(folder)]
@@ -126,11 +171,11 @@ class WindowsAdapter:
             if tab.get('state')!='found':
                 observation=dict(state='unavailable',evidence='coworker_header_not_found')
             if tab['state']=='found' and not tab['match']['selected'] and tab['match'].get('target'):
-                self.invoke(tab['match']['target']);time.sleep(.25);tab=self.query('CoworkerTab')
+                self.invoke(tab['match']['target']);self.operation_sleep(.25);tab=self.query('CoworkerTab')
             if tab['state']=='found' and tab['match']['selected']:
                 observation=self.ps('read-coworker-progress.ps1','-WindowHandle',str(self.hwnd),'-CoworkerTabConfirmed')
             if observation.get('state') in ('empty','records','first_record'):break
-            if attempt == 0:time.sleep(.3)
+            if attempt == 0:self.operation_sleep(.3)
         return observation
 
     def complete_visual(self,candidate,answer):
@@ -178,21 +223,16 @@ class WindowsAdapter:
                 data=dict(keyword_text='',resume_text='',overview_text='',read_complete=False)
             else:
                 return dict(keyword_text='',read_complete=False,read_warning=warning or '正文采集失败')
-        text=data.get('keyword_text','')
+        text=resume_full_text(data)
         result=dict(keyword_text=text,read_source=data.get('source','directed_resume_uia'),read_complete=data.get('read_complete',False))
         if warning:result['uia_read_warning']=warning
         if not rules.get('list_prefilter') and not recruiting_rules.is_domain(rules) and fast_assessment.evaluate(rules,result,recruiting_rules.positive_hits):
             result['resume_save_note']='关键词直接通道使用UIA正文，未执行可选长图/OCR采集，因此没有简历图片文件。'
             return result
-        # Overview text is useful for a direct rule, but does not prove that a
-        # canvas-rendered resume body was read. Test body length independently.
-        body=data.get('resume_text',text)
-        if '经历概览' in body and not any(section in body for section in ('工作经历','个人优势','教育经历','期望职位')):
-            result['read_complete']=False
         result['resume_save_note']=('本轮关闭了可选OCR（--no-ocr），未采集简历长图。' if not self.allow_ocr else
                                     '已通过UIA读取正文，本次未执行可选长图/OCR采集。')
         # New list-prefilter runs read the resume body through scrolling capture/OCR.
-        if (rules.get('list_prefilter') or len(body.strip())<80 or not result['read_complete'] and (recruiting_rules.is_domain(rules) or mode=='worker_resume')) and self.allow_ocr:
+        if (rules.get('list_prefilter') or not result['read_complete']) and self.allow_ocr:
             if rules.get('current_rules'):
                 import candidate_checks
                 candidate_checks.require_resume(self.db,self.run,candidate['candidate_id'])
@@ -217,8 +257,8 @@ class WindowsAdapter:
                 result['resume_evidence']=captured['resume_evidence']
                 result.pop('resume_save_note',None)
                 ocr_text=Path(captured['resume_evidence']['ocr_text']).read_text(encoding='utf-8-sig')
-                result['keyword_text']='\n'.join(part for part in (ocr_text,data.get('overview_text','')) if part)
-                result['read_source']='local_ocr_and_overview_uia'
+                result['keyword_text']=resume_full_text(data,ocr_text)
+                result['read_source']='local_ocr_and_full_resume_uia'
                 result['read_complete']=True
             except (OSError,ValueError,subprocess.SubprocessError) as exc:
                 import resume_diagnostics
@@ -268,6 +308,13 @@ class WindowsAdapter:
 
     def prefilter(self,candidate):
         folder=self.folder/('prefilter-'+uuid.uuid4().hex)
+        text=(candidate.get('readable_text') or candidate.get('summary') or '').strip()
+        if text:
+            folder.mkdir(parents=True,exist_ok=True)
+            evidence=folder/'prefilter.uia.json'
+            evidence.write_text(json.dumps(candidate,ensure_ascii=False,indent=2),encoding='utf-8')
+            return dict(card=dict(readable_text=text),raw_text=text,worker_stage='list',
+                        card_evidence=dict(uia_json=str(evidence)))
         result=self.ps('capture-card.ps1','-WindowHandle',str(self.hwnd),'-CandidateName',candidate['candidate_name'],'-CardRuntime',candidate['card_runtime'],'-OutputDirectory',str(folder),'-NoImage')
         return dict(card=result['card'],raw_text=result['card'].get('readable_text',result.get('raw_text','')),worker_stage='list',card_evidence=dict(uia_json=str(folder/'card.uia.json')))
 

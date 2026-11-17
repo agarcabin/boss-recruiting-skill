@@ -45,11 +45,11 @@ def business_check(db, run_id, candidate_id):
         raise ValueError('run_target_reached')
 
 
-def dispatch(db, run_id, generation, command, token=None):
+def dispatch(db, run_id, generation, command, token=None, timeout=8):
     # No action lock, run-state/generation, active-candidate or token validity gate.
     import foreground_activity
     with foreground_activity.track(db,run_id,command):
-        process = subprocess.run(command, capture_output=True, timeout=8, **hidden_options())
+        process = subprocess.run(command, capture_output=True, timeout=timeout, **hidden_options())
     if process.returncode:
         raise RuntimeError(process.stderr.decode('utf-8', errors='replace')[-1600:])
     return {'state': 'dispatched', 'verified_sent': False, 'token': token,

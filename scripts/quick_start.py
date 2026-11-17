@@ -75,7 +75,7 @@ def parse(prompt,projects,at=None):
     target,max_views=run_targets.resolve(int(greeting.group(1)) if greeting else None,int(viewing.group(1)) if viewing else None)
     # Deduplicate an alias and a full-name match for the same profile.
     matches=list({str(p['profile']):p for p in matches}.values())
-    if re.fullmatch(r'菜单[：:]?1',text) or (not matches and not greeting and not viewing and not re.fullmatch(r'菜单[：:]?2',text)):
+    if re.fullmatch(r'菜单[：:]?1',text) or (not matches and not re.fullmatch(r'菜单[：:]?2',text)):
         return dict(state='menu',menu_level='home',target=target,max_views=max_views,
                     next_actions=['show_home_menu'])
     if re.fullmatch(r'菜单[：:]?2',text) or len(matches)!=1:
@@ -185,6 +185,9 @@ def main():
         plan=refresh_selected(plan,args.db)
         if plan['state'] not in ('await_filters','ready_to_start'):
             print(json.dumps(plan,ensure_ascii=False));return
+        import page_layout
+        page_layout.ensure_sidebar_hidden(plan.get('chat_title'))
+        startup_plan.complete(plan, 'collapse_chat_sidebar')
         with contextlib.closing(ledger.connect(args.db)) as db:
             import run_safety
             with run_safety.action_lock(db):

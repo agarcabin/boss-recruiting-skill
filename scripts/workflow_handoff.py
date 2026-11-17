@@ -18,7 +18,7 @@ def snapshot(db, run_id):
     result = dict(state=control if control != 'running' else data.get('scheduler_state', row['phase']),
                   run_id=run_id, phase=row['phase'], visits=data.get('visits', 0),
                   candidate_name=(data.get('candidate') or {}).get('candidate_name'),
-                  error=data.get('error'))
+                  error=data.get('error'),notice_wait=data.get('notice_wait'))
     if control != 'running':
         return result
     kind = data.get('handoff_kind')

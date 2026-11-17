@@ -25,6 +25,8 @@ try {
   $connection='OLEDB;Provider=Microsoft.Mashup.OleDb.1;Data Source=$Workbook$;Location='+$queryName+';Extended Properties=""'
   $table=$ws.ListObjects.Add(0,$connection,[Type]::Missing,1,$ws.Cells.Item($start,1))
   $table.Name=$tableName
+  $table.ShowTableStyleRowStripes=$false
+  $table.ShowTableStyleColumnStripes=$false
   $q=$table.QueryTable
   $q.CommandType=2;$q.CommandText='SELECT * FROM ['+$queryName+']'
   # Hidden evidence/path fields must never inflate visible row heights on refresh.
@@ -33,6 +35,7 @@ try {
   $q.RefreshPeriod=1;$q.RefreshOnFileOpen=$true;$q.RefreshStyle=1
   if(!$q.Refresh($false)){throw 'excel_first_refresh_failed'}
   if($q.RefreshPeriod -ne 1 -or !$q.RefreshOnFileOpen){throw 'excel_refresh_settings_not_retained'}
+  if($table.DataBodyRange){$null=$table.DataBodyRange.Interior.ColorIndex=-4142}
   if($spec.links){
    foreach($prop in $spec.links.PSObject.Properties){
     $column=$table.ListColumns.Add();$column.Name=$prop.Name
@@ -46,7 +49,6 @@ try {
   $batchRefs+="'$($ws.Name.Replace("'","''"))'!"+$ws.Cells.Item($start+1,$spec.columns.Count-1).Address($false,$false)
   $refreshRefs+="'$($ws.Name.Replace("'","''"))'!"+$ws.Cells.Item($start+1,$spec.columns.Count+1).Address($false,$false)
   if($spec.sheet -eq '候选人简报'){
-   $null=$table.DataBodyRange.Interior.ColorIndex=-4142
    $null=$table.DataBodyRange.FormatConditions.Delete()
    $first=$start+1
    $green=$table.DataBodyRange.FormatConditions.Add(2,[Type]::Missing,'=OR($J'+$first+'="sent",ISNUMBER(SEARCH("第1句:sent",$J'+$first+')))')

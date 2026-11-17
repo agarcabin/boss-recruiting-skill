@@ -76,6 +76,8 @@ def _capture(db, run_id, candidate_id, hwnd, output_dir, execute=None):
     ocr_body=text.read_text(encoding='utf-8-sig')
     if any(marker in ocr_body for marker in ('该牛人近期受同行BOSS欢迎','热搜牛人','相关推荐')):
         raise ValueError('resume_capture_occluded_by_recommendations')
+    if result.get('captureMode') == 'single_page' and '牛人' not in ocr_body:
+        raise ValueError('resume_single_page_bottom_marker_missing')
     return {'state': 'ready_for_assessment', 'run_id': run_id, 'candidate_id': candidate_id,
             'generation': generation, 'resume_evidence': {'image': str(image), 'ocr_text': str(text), 'ocr_json': str(detail)}}
 

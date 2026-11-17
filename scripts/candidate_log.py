@@ -101,7 +101,7 @@ def table(db):
 
 def daily_dir(root: Path, started_at: str) -> Path:
     stamp = datetime.fromisoformat(started_at).astimezone(CN_TZ)
-    return workspace_paths.records_dir(root) / stamp.date().isoformat()
+    return workspace_paths.records_dir(root) / stamp.date().isoformat() / '运行记录'
 
 
 def recorded_time(assessed_at: str) -> str:
@@ -216,9 +216,6 @@ def workbook(db,root,started_at,filename=None,profile_path=None,run_id=None,run_
         profiles=db.execute('SELECT DISTINCT profile FROM run_identity').fetchall()
         if len(profiles)!=1:raise ValueError('report_profile_required')
         profile_path=profiles[0][0]
-    import csv_report
-    if csv_report.enabled(db,profile_path,started_at):
-        return csv_report.export(db,root,started_at,profile_path)
     with report_store.export(db,root,started_at,profile_path) as path:
         if db.in_transaction:raise ValueError('report_requires_committed_candidate_data')
         snapshot=sqlite3.connect(':memory:');snapshot.row_factory=sqlite3.Row
@@ -237,12 +234,6 @@ def _render_workbook(db, root: Path, started_at: str, filename: str | None = Non
     wb = Workbook()
     summary = wb.active
     summary.title = "候选人简报"
-    headers=list(SUMMARY_HEADERS)
-    if profile_path and report_store.for_profile(db,profile_path)['mode']=="card": headers[-1]="查看名片"
-    summary.append(headers)
-    details = wb.create_sheet("详细信息")
-    details.append(DETAIL_HEADERS)
-    details.sheet_state = "hidden"
     if profile_path is None:
         candidates=db.execute('SELECT DISTINCT profile_path FROM runs').fetchall()
         if len(candidates)!=1: raise ValueError('report_profile_required_for_multiple_or_no_projects')
@@ -258,6 +249,15 @@ def _render_workbook(db, root: Path, started_at: str, filename: str | None = Non
         profile_path = rows[0]["profile_path"]
     identity = report_store.for_profile(db,profile_path)['job']
     path = _destination
+    rule_row=(db.execute('SELECT rule_snapshot FROM runs WHERE run_id=?',(run_id,)).fetchone() if run_id else
+              db.execute('SELECT rule_snapshot FROM runs WHERE profile_path=? ORDER BY started_at DESC LIMIT 1',(str(profile_path),)).fetchone())
+    show_pros_cons=bool(rule_row and json.loads(rule_row['rule_snapshot'] or '{}').get('ai_pros_cons',True))
+    headers=[header for header in SUMMARY_HEADERS if show_pros_cons or header not in ('优点','缺点')]
+    if report_store.for_profile(db,profile_path)['mode']=="card": headers[-1]="查看名片"
+    summary.append(headers)
+    details = wb.create_sheet("详细信息")
+    details.append(DETAIL_HEADERS)
+    details.sheet_state = "hidden"
     for row in rows:
         if report_store.for_run(db,row['run_id'])['job'] != identity:
             continue
@@ -276,10 +276,14 @@ def _render_workbook(db, root: Path, started_at: str, filename: str | None = Non
         if score_incomplete:label='未完整评分'
         overall_score = None if coworker_skipped or coworker_unknown or score_incomplete else row["overall_score"]
         hits=json.loads(row['eligibility_json'] or '{}').get('hits',[])
-        summary.append([entered_at, row["candidate_name"], overall_score, label, duration,
-                        row["pros"], row["cons"], hit_summary.grouped(hits), json.loads(row["eligibility_json"] or "{}").get("trigger","score"),
-                        message_summary(db,row), "查看名片" if row["evaluation_mode"]=="card" else "查看简历"])
-        link_cell = summary.cell(row=summary.max_row, column=len(SUMMARY_HEADERS))
+        summary_values=dict(录入时间=entered_at,候选人=row["candidate_name"],综合分=overall_score,判定=label,
+            判断时长=duration,命中词=hit_summary.grouped(hits),
+            触发方式=json.loads(row["eligibility_json"] or "{}").get("trigger","score"),
+            招呼结果=message_summary(db,row),查看简历="查看名片" if row["evaluation_mode"]=="card" else "查看简历")
+        if show_pros_cons:
+            summary_values.update(优点=row["pros"],缺点=row["cons"])
+        summary.append([summary_values[header] for header in headers])
+        link_cell = summary.cell(row=summary.max_row, column=headers.index("查看简历")+1)
         evidence_image=row["card_image_path"] if row["evaluation_mode"]=="card" else row["resume_image_path"]
         marked = row['resume_marked_image_path'] if 'resume_marked_image_path' in row.keys() else None
         original_image = evidence_image
@@ -290,10 +294,6 @@ def _render_workbook(db, root: Path, started_at: str, filename: str | None = Non
             link_cell.style = "Hyperlink"
         else:
             link_cell.value = "未保存"
-        original_cell = summary.cell(row=summary.max_row, column=len(SUMMARY_HEADERS)+1, value='查看原图' if original_image else '未保存')
-        if original_image and Path(original_image).is_file():
-            original_cell.hyperlink=Path(original_image).resolve().as_uri()
-            original_cell.style='Hyperlink'
         details.append([entered_at, fields.get("company", ""), fields.get("position", ""), row["run_id"],
                         row["candidate_name"], row["candidate_hash"], row["started_at"], row["ended_at"],
                         duration, duration_seconds, row["list_score"], hit_summary.display(row["list_evidence"],hits),
@@ -320,7 +320,6 @@ def _render_workbook(db, root: Path, started_at: str, filename: str | None = Non
                 cell.fill = PatternFill("solid", fgColor=fill)
                 cell.font = Font(color=font_color)
     evidence_sheet=wb.create_sheet("评估证据")
-    summary.cell(row=1,column=len(SUMMARY_HEADERS)+1,value='原图')
     evidence_sheet.sheet_state="hidden"
     evidence_sheet.append(["运行编号","候选人哈希","模式","触发依据","招呼消息状态","卡片图","UIA原文","计时来源","收藏状态"])
     has_favorites=db.execute("SELECT 1 FROM sqlite_master WHERE name='favorite_results'").fetchone()

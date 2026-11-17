@@ -32,6 +32,7 @@ def write_pin(root,record):
 
 def release_version(root,base_version):
     """Use a beta channel only for the WeCom migration worktree."""
+    base_version=base_version.removesuffix('-beta')
     try:
         branch=subprocess.run(['git','-C',str(root),'branch','--show-current'],
                               capture_output=True,text=True,encoding='utf-8',
@@ -176,8 +177,8 @@ def sanitize_text(text,payload):
 
 def build(root,output,public_root,legacy_dir=None,include_user_projects=False):
     root=Path(root);output=Path(output);public_root=Path(public_root)
-    from skill_update import installed_version
-    base_version=installed_version(root)
+    from skill_update import installed_version,release_base_version
+    base_version=release_base_version(installed_version(root))
     version=release_version(root,base_version)
     if public_root.exists() and any(public_root.iterdir()):raise ValueError('public_source_target_must_be_empty')
     record=issuer();payload=collect(root,include_user_projects);legacy=materials(legacy_dir)
@@ -203,7 +204,7 @@ def build(root,output,public_root,legacy_dir=None,include_user_projects=False):
     for name in ('scripts','references','agents','docs'):
         for path in (root/name).rglob('*'):
             if not path.is_file() or path.suffix not in ('.py','.ps1','.md','.json','.yaml','.yml','.txt') or '__pycache__' in path.parts:continue
-            if path.name.startswith('test_') and path.name not in ('test_core_contract.py','test_release149.py','test_release1410.py','test_hr_job.py','test_local_startup.py','test_misjudgment_review.py'):continue
+            if path.name.startswith('test_') and path.name not in ('test_core_contract.py','test_release149.py','test_release1410.py','test_hr_job.py','test_local_startup.py','test_misjudgment_review.py','test_layout_startup.py','test_notice_wait.py','test_report_layout.py','test_stop_feedback.py'):continue
             if path.name in ('resume-extraction-test-results.md','resume-extraction-test-plan.md','uia-resume-diagnostic-report.md'):continue
             if name=='references' and path.name in ('recruiting-rules.json','project-vault.json','publisher-key.json'):continue
             relative=path.relative_to(root).as_posix()
@@ -222,7 +223,9 @@ def build(root,output,public_root,legacy_dir=None,include_user_projects=False):
     defaults=dict(version=7,worker_advantage=[],worker_expectation=[],group_policies={})
     (public_root/'references/recruiting-rules.json').write_bytes(crypto.canonical(defaults))
     (public_root/'README.md').write_text(sanitize_text((root/'README.md').read_text(encoding='utf-8-sig'),payload),encoding='utf-8')
-    (public_root/'SKILL.md').write_text(sanitize_text((root/'SKILL.md').read_text(encoding='utf-8-sig'),payload),encoding='utf-8')
+    skill_text=sanitize_text((root/'SKILL.md').read_text(encoding='utf-8-sig'),payload)
+    skill_text=re.sub(r'(?m)^  version:.*$',lambda _: '  version: "'+version+'"',skill_text,count=1)
+    (public_root/'SKILL.md').write_text(skill_text,encoding='utf-8')
     (public_root/'CHANGELOG.md').write_text(sanitize_text((root/'CHANGELOG.md').read_text(encoding='utf-8-sig'),payload),encoding='utf-8')
     from public_docs import DOCS
     for name,fallback in {**DOCS,'evaluation-modes.md':GENERIC_EVALUATION,'v1.4.0-policy.md':'','v1.3.3-policy.md':'','v1.4.2-policy.md':''}.items():

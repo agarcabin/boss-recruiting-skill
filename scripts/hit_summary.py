@@ -52,6 +52,9 @@ def grouped(hits):
         group=str(hit.get('group','')).upper()
         word=hit.get('word') or hit.get('company')
         if group in groups and isinstance(word,str) and word and word not in groups[group]:groups[group].append(word)
-    if any(groups.values()):
+    populated=[key for key,values in groups.items() if values]
+    if len(populated)==1:
+        return '词库：'+'、'.join(groups[populated[0]])
+    if len(populated)>1:
         return '；'.join(key+'组：'+('、'.join(values) if values else '未命中') for key,values in groups.items())
     return '、'.join(words(hits)) or '未命中'

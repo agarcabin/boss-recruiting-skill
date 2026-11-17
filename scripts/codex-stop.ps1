@@ -5,6 +5,7 @@ $OutputEncoding = [Text.UTF8Encoding]::new($false)
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+. (Join-Path $PSScriptRoot 'stop-confirmation.ps1')
 $b=Get-Content -LiteralPath $Binding -Raw | ConvertFrom-Json
 if($b.kind -ne 'uia' -or !$b.chat_marker -or !$b.scope_runtime_id -or !$b.hwnd -or !$b.process_id -or !$b.process_started_at){throw 'incomplete_chat_specific_binding'}
 $process=Get-Process -Id $b.process_id -ErrorAction Stop
@@ -37,7 +38,7 @@ return $scope
 function Test-IdleScope($scope){
  $idleButtons=@($scope.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.PropertyCondition]::new(
   [System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Button))|Where-Object {
-   !$_.Current.IsOffscreen -and $_.Current.Name -in @('发送','发送消息','开启语音聊天','Send','Start voice chat')})
+   !$_.Current.IsOffscreen -and $_.Current.Name -in @('发送','发送消息','提交','提交提示','开启语音聊天','Send','Send message','Submit','Start voice chat')})
  return $idleButtons.Count -gt 0
 }
 $scope=Get-BoundScope
@@ -47,7 +48,8 @@ $buttonCondition=[System.Windows.Automation.AndCondition]::new(
 $buttons=@($scope.FindAll([System.Windows.Automation.TreeScope]::Descendants,$buttonCondition) | Where-Object {!$_.Current.IsOffscreen -and $_.Current.IsEnabled})
 if($buttons.Count -eq 0){
  if(Test-IdleScope $scope){@{state='idle';kind='uia';chat_marker=$b.chat_marker}|ConvertTo-Json -Compress;exit 0}
- throw 'stop_or_idle_state_unavailable'
+ # A transient/disabled composer is not proof of either failure or success.
+ @{state='unconfirmed';kind='uia';reason='stop_or_idle_state_unavailable';chat_marker=$b.chat_marker}|ConvertTo-Json -Compress;exit 0
 }
 if($buttons.Count -ne 1){throw 'unique_active_stop_button_required'}
 $invoke=$null
@@ -55,13 +57,16 @@ if(!$buttons[0].TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::
 if($Action -eq 'Stop'){
  $invoke.Invoke()
  $confirmed=$false
+ $missingSamples=0
  for($i=0;$i -lt 100;$i++){
   Start-Sleep -Milliseconds 100
   try{
    $scope=Get-BoundScope
-   $remaining=@($scope.FindAll([System.Windows.Automation.TreeScope]::Descendants,$buttonCondition) | Where-Object {!$_.Current.IsOffscreen -and $_.Current.IsEnabled})
-   if($remaining.Count -eq 0 -and (Test-IdleScope $scope)){$confirmed=$true;break}
-  }catch [System.Windows.Automation.ElementNotAvailableException] {continue}
+   $remaining=@($scope.FindAll([System.Windows.Automation.TreeScope]::Descendants,$buttonCondition) | Where-Object {!$_.Current.IsOffscreen})
+   $confirmation=Get-StopConfirmation $remaining.Count $missingSamples
+   $missingSamples=$confirmation.missing_samples
+   if($confirmation.confirmed){$confirmed=$true;break}
+  }catch [System.Windows.Automation.ElementNotAvailableException] {$missingSamples=0;continue}
  }
  if(!$confirmed){@{state='unconfirmed';kind='uia';reason='turn_interrupt_not_confirmed';chat_marker=$b.chat_marker}|ConvertTo-Json -Compress;exit 0}
 }

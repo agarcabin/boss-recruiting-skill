@@ -67,15 +67,19 @@ class ReleaseTests(unittest.TestCase):
         db.execute('CREATE TABLE settings(key PRIMARY KEY,value)')
         adapter=Mock(db=db,run='live-probe')
         adapter.query.side_effect=[dict(state='read',fits=False),dict(state='read',fits=True)]
+        binding_temp=tempfile.TemporaryDirectory();self.addCleanup(binding_temp.cleanup)
+        binding=Path(binding_temp.name)/'binding.json';binding.write_text(json.dumps(dict(chat_title='Test chat')))
+        environment=patch.dict(os.environ,{'BOSS_BROWSER_BINDING':str(binding)});environment.start();self.addCleanup(environment.stop)
+        sidebar=patch('page_layout.ensure_sidebar_hidden',return_value=dict(state='collapsed',chat_title='Test chat'));sidebar.start();self.addCleanup(sidebar.stop)
         with patch('page_layout.query',side_effect=[dict(state='read',percent=100,binding_id='bound'),dict(state='read',percent=90)]) as query:
             page_layout.prepare(adapter)
         self.assertEqual(query.call_args_list[-1].args,('Set',90,'bound'))
-        record=json.loads(db.execute('SELECT value FROM settings').fetchone()[0])
+        record=json.loads(db.execute("SELECT value FROM settings WHERE key='boss_zoom/live-probe'").fetchone()[0])
         self.assertEqual((record['original'],record['last']),(100,90))
         adapter.query.side_effect=[dict(state='read',fits=False)]
         with patch('page_layout.query',side_effect=[dict(state='read',percent=90,binding_id='bound'),dict(state='unsupported',percent=80)]):
             with self.assertRaisesRegex(ValueError,'无法确认'):page_layout.prepare(adapter)
-        record=json.loads(db.execute('SELECT value FROM settings').fetchone()[0])
+        record=json.loads(db.execute("SELECT value FROM settings WHERE key='boss_zoom/live-probe'").fetchone()[0])
         self.assertEqual(record['last'],80)
 
     def test_zoom_restore_preserves_user_change(self):
@@ -102,7 +106,7 @@ class ReleaseTests(unittest.TestCase):
     def test_coworker_notice_is_required_and_bound_to_observation(self):
         db=sqlite3.connect(':memory:');db.row_factory=sqlite3.Row;self.addCleanup(db.close)
         run=dict(generation=1,rule_snapshot=json.dumps(dict(coworker_notice_policy=1,mode='resume')))
-        observation=dict(state='unavailable',evidence='record list unreadable')
+        observation=dict(state='records',records=['2026-01-01'],records_complete=False,evidence='partial historical records')
         with patch('ledger.run_row',return_value=run),patch('ledger.run_candidate_hash',return_value='visit'):
             self.assertFalse(candidate_checks.evaluate_resume(db,'r','c',observation)['may_continue'])
             notice=candidate_checks.notice_id(db,'r','c',observation)
@@ -140,7 +144,7 @@ class ReleaseTests(unittest.TestCase):
             run=db.execute('SELECT * FROM runs').fetchone();rid=run['run_id'];cid='candidate'
             candidate_log.table(db)
             ledger.ensure_candidate(db,rid,cid)
-            observation=dict(state='unavailable',evidence='record list unreadable',observed_at=datetime.now(timezone.utc).isoformat())
+            observation=dict(state='records',records=['2026-01-01'],records_complete=False,evidence='partial historical records',observed_at=datetime.now(timezone.utc).isoformat())
             self.assertFalse(candidate_checks.record(db,rid,cid,observation)['may_continue'])
             notice=candidate_checks.notice_id(db,rid,cid,observation)
             candidate_checks.acknowledge_notice(db,rid,cid,observation,dict(notice_id=notice,displayed=True))

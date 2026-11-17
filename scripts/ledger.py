@@ -246,6 +246,9 @@ def control(db: sqlite3.Connection, args: argparse.Namespace) -> None:
     db.execute("BEGIN IMMEDIATE")
     try:
         before = control_state(db, args.run)
+        if args.action == 'resume' and before in ('running', 'paused'):
+            import notice_wait
+            notice_wait.skip(db, args.run)
         control_row = db.execute(
             "SELECT state,pause_reason,updated_at,paused_at,paused_seconds FROM run_control WHERE run_id=?",
             (args.run,),
@@ -406,8 +409,10 @@ def start(db,args):
 
 _start_unprotected=start
 def start(db,args):
-    import run_admission
-    with run_admission.start(db):return _start_unprotected(db,args)
+    import run_admission,run_cleanup,local_mutex
+    with local_mutex.locked('recruiting-startup:'+run_admission.path(db).casefold()):
+        run_cleanup.close_previous(db)
+        with run_admission.start(db):return _start_unprotected(db,args)
 
 
 def status(db: sqlite3.Connection, args: argparse.Namespace) -> None:

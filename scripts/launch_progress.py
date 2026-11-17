@@ -29,8 +29,17 @@ def main():
         except (OSError,ValueError,RuntimeError,subprocess.SubprocessError) as exc:
             binding_status='failed: '+str(exc)
         db.execute('UPDATE runs SET interrupt_status=? WHERE run_id=?',(binding_status,a.run))
-        command=[str(pythonw),'-X','utf8',str(Path(__file__).with_name('progress_window.py')),'--db',str(a.db),'--run',a.run,'--output-root',str(a.output_root)]
-        process=launch_process(command)
+        import run_cleanup,run_safety,local_mutex,run_admission
+        with local_mutex.locked('recruiting-startup:'+run_admission.path(db).casefold()):
+            if ledger.run_row(db,a.run)['stop_reason']:raise ValueError('run_already_stopped')
+            run_cleanup.close_previous(db,keep_run=a.run,root=a.output_root)
+            owner=db.execute('SELECT pid,birth FROM overlay_owner WHERE run_id=?',(a.run,)).fetchone()
+            if owner and run_cleanup.alive(owner['pid'],owner['birth']):
+                ledger.output(state='overlay_already_running',pid=owner['pid'],run_id=a.run)
+                return
+            command=[str(pythonw),'-X','utf8',str(Path(__file__).with_name('progress_window.py')),'--db',str(a.db),'--run',a.run,'--output-root',str(a.output_root)]
+            process=launch_process(command)
+            db.execute('INSERT OR REPLACE INTO overlay_owner VALUES (?,?,?)',(a.run,process.pid,run_safety.process_birth(process.pid)))
         ledger.output(state='overlay_started',pid=process.pid,require_visible_confirmation=True,stop_binding=binding_status)
     finally:db.close()
 if __name__=='__main__':main()
