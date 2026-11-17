@@ -13,10 +13,10 @@ python scripts/quick_start.py --prompt "给已选择的企业岗位打招呼50�
 默认150招呼、300查看；只指定招呼数时查看默认max(300,招呼目标)，显式查看目标优先。当前任一数量目标达到即在当前候选收尾后结束，不打开下一位。无时长和滚动24小时上限。
 
 python scripts/launch_progress.py --run <run_id>
-python scripts/workflow_runner.py --run <run_id> --hwnd <窗口句柄> --launch
+python scripts/workflow_runner.py --run <run_id> --browser-binding <浏览器插件绑定JSON> --launch
 python scripts/workflow_runner.py --run <run_id> --status
 
-可省略hwnd，由定向UIA寻找唯一窗口；--no-ocr关闭可选OCR。一个运行一个主执行器。常规顺序：定位→真正打开并登记查看→同事检查→读取→项目策略→发送核验→收藏→计时收尾→刷新日表→下一位。不用单步命令重复执行主循环已经完成的动作。
+页面读取和动作默认使用后台UIA，只有截图通过浏览器插件；绑定实际iab标签页，按browser-plugin.md处理截图needs_browser。--no-ocr仅在用户明确要求关闭时使用。一个运行一个主执行器。常规顺序：定位→真正打开并登记查看→同事检查→读取→一次多页截图→项目策略→发送核验→收藏→计时收尾→刷新日表→下一位。不用单步命令重复执行主循环已经完成的动作。
 
 ## 同事、评估与发送
 

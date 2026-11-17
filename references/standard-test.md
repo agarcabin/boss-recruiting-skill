@@ -1,14 +1,9 @@
-> 1.0.12：运行控制以[control-policy.md](control-policy.md)为准；下文历史时间/额度、审核阻塞、强制OCR、未决核销及逐动作门禁不再生效。
+# 新电脑标准化测试（1.4.16-beta）
 
-# 新电脑标准化测试
+仅首页第5项“测试”调用 scripts/standard_test.py；普通已授权招聘不重复执行环境测试。报告写入桌面“自动招呼/01 招呼记录/标准化测试”。
 
-此测试只属于首页的“4. 测试项目”，不作为普通项目开始投递的前置条件。用户选择测试项目后，运行 `scripts/standard_test.py` 生成本机报告；该脚本不发送招呼、不打开或保存真实候选人简历。报告放在桌面 `自动投递记录/标准化测试/`，文件名含电脑名与日期。
+脚本检测Python、Excel/PDF/OCR库、便携运行时、窗口创建、临时账本、招聘流程离线测试、后台UIA与浏览器截图交接模块。不会启动鼠标轨迹、桌面截图、宿主最大化或窗口前置。
 
-1. 先用 `scripts/verify_runtime.ps1` 确认完整包内的 `runtime/win-x64/python/python.exe` 和三个 RapidOCR 模型；再用该便携 Python 运行 `scripts/standard_test.py`。检查 Python/openpyxl/pypdf、RapidOCR、ONNX Runtime、OpenCV、桌面写入、临时账本、招聘流程测试、Codex 最大化、PowerShell 7、点击轨迹 dry run、点击后 1 秒随机移动支持情况和等待鼠标圆周轨迹 dry run。任何自动检查失败都记入报告。
-2. 在已打开的 Codex 内置浏览器上做**只读坐标校准**：选择一个不会触发发送、删除或提交的控件，取得真实 Win32 顶层窗口句柄、物理屏幕坐标和浏览器内容物理边界。核对截图与物理坐标转换，再运行 `scripts/move-click.ps1 -DryRun`；只有实际观察确认坐标落在该控件内、窗口句柄属于当前窗口后，才可带 `--browser-verified --browser-evidence "<简短实测记录>"` 重新生成报告。浏览器返回的 opaque window ID 不能直接当 Win32 HWND。无法完成映射则报告保持“待核验”。
-3. 阅读报告的每一项并向用户汇报。失败或待核验项只阻止测试项目中的后续 5 人试投，按结果修复或标明限制；不阻止用户从普通项目直接开始已授权的投递。报告只证明本机当时环境状态，不证明平台不会限制发送。
+实际页面验证必须通过用户指定的 [浏览器](plugin://browser@openai-bundled)，读取当前聊天iab标签页的实际BOSS URL和可见快照，并按需用插件截图；不发送、不打开或保存真实候选人简历。无法核实则保留“待核验”，不能把后台绑定格式检查当插件实测通过。
 
-```text
-python scripts/standard_test.py
-python scripts/standard_test.py --browser-verified --browser-evidence "窗口句柄、浏览器物理边界和安全控件中心已现场核验；dry run 坐标吻合"
-```
+只有确实完成上述只读验证后，才用 --browser-verified --browser-evidence 加入当次真实观测；不需要Win32句柄或桌面坐标。运行和交接格式见 [浏览器契约](browser-plugin.md)。如实汇报失败及待验收项，不把测试报告当发送成功证明。

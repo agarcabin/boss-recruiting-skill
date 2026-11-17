@@ -15,6 +15,16 @@ AI_HANDOFFS={'assessment','misjudgment_review','summary','followups','overall_re
 WAIT_STATES={'paused','login_required','needs_page','rate_limited','short_view_wait'}
 
 
+def resolve_uia_binding(browser_binding=None, explicit=None):
+    if explicit:
+        return Path(explicit).resolve()
+    if browser_binding:
+        candidate=Path(browser_binding).resolve().with_name('uia-binding.json')
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def phase_activity(phase,data):
     """Classify each persisted slice for later process/time review."""
     scheduler=data.get('scheduler_state')
@@ -296,8 +306,8 @@ class Runner:
             self.data['coworker_result']=result
             if result.get('notice_required') and not result.get('notice_confirmed'):
                 notice = dict(notice_id=candidate_checks.notice_id(self.db,self.run,cid,observation),
-                    message='跳过了同事沟通记录判断', candidate=candidate,
-                    reason=result.get('unreadable_reason', observation.get('evidence')),
+                    message='同事沟通记录判断超过5秒，已跳过该判断' if observation.get('evidence')=='coworker_timeout_5s' else '跳过了同事沟通记录判断', candidate=candidate,
+                    reason=observation.get('evidence') if observation.get('evidence')=='coworker_timeout_5s' else result.get('unreadable_reason', observation.get('evidence')),
                     instruction='先在当前对话逐人输出message、候选人及简短原因，再返回notice_id和displayed:true；不需要用户再次许可。')
                 pending = self.handoff('coworker_notice', notice)
                 answer = self.response()
@@ -322,7 +332,9 @@ class Runner:
             facts=dict(self.data['facts'])
             rules=recruiting_rules.run_rules(run)
             if (recruiting_rules.is_domain(rules) or rules.get('list_prefilter')) and facts.get('read_complete') is not True:
-                self.record_payload(dict(facts,decision='review',overall_score=0,electronic_resume_enabled=False,hard_requirements=False,pros='正文未完整读取，尚未完成评分',cons='保留实际材料，未发送'))
+                detail=facts.get('resume_save_error') or facts.get('read_warning') or facts.get('uia_read_warning') or '采集结果未确认完整，需重新读取'
+                if 'resume_scroll_target_missing_after_layer_fallbacks' in str(detail):detail='未找到简历正文的可滚动区域，无法完成全文采集'
+                self.record_payload(dict(facts,decision='review',overall_score=0,electronic_resume_enabled=False,hard_requirements=False,pros='正文未完整读取，尚未完成评分',cons='保留实际材料，未发送；原因：'+str(detail)))
                 self.phase='finish';return None
             if hr_timing:
                 result=recruiting_rules.evaluate(rules,facts,run['min_score'])
@@ -564,11 +576,14 @@ def main():
     p.add_argument('--db',type=Path,default=ledger.DEFAULT_DB);p.add_argument('--run',required=True)
     p.add_argument('--output-root',type=Path,default=workspace_paths.desktop_dir());p.add_argument('--hwnd',type=int)
     p.add_argument('--status',action='store_true');p.add_argument('--worker',action='store_true');p.add_argument('--launch',action='store_true')
-    p.add_argument('--browser-binding',type=Path,help='Required current-chat Codex IAB binding')
+    p.add_argument('--browser-binding',type=Path,help='Browser plugin binding JSON: provider, browser=iab, tab_id, url')
+    p.add_argument('--uia-binding',type=Path,help='Optional UIA binding; defaults to uia-binding.json beside the Browser binding')
     p.add_argument('--no-ocr',action='store_true',help='Disable optional fallback OCR')
     args=p.parse_args()
-    if args.browser_binding:os.environ['BOSS_BROWSER_BINDING']=str(args.browser_binding.resolve())
-    if not args.status and not os.environ.get('BOSS_BROWSER_BINDING'):p.error('codex_iab_binding_required; open BOSS with open_in_codex and bind-boss-browser.ps1')
+    uia_binding=resolve_uia_binding(args.browser_binding,args.uia_binding)
+    if uia_binding:os.environ['BOSS_BROWSER_BINDING']=str(uia_binding.resolve())
+    if not args.status and not os.environ.get('BOSS_BROWSER_BINDING'):
+        p.error('uia_binding_required; create uia-binding.json beside the Browser binding')
     if args.launch:
         from launch_progress import launch_process
         import sys
@@ -576,10 +591,15 @@ def main():
         command=[str(pythonw),'-X','utf8',__file__,'--db',str(args.db),'--run',args.run,'--output-root',str(args.output_root),'--worker']
         if args.hwnd:command+=['--hwnd',str(args.hwnd)]
         if args.no_ocr:command+=['--no-ocr']
+        if args.browser_binding:command+=['--browser-binding',str(args.browser_binding.resolve())]
+        if uia_binding:command+=['--uia-binding',str(uia_binding.resolve())]
         process=launch_process(command);print(json.dumps(dict(state='runner_started',pid=process.pid,run_id=args.run)));return
     with contextlib.closing(ledger.connect(args.db)) as db:
-        from workflow_windows import WindowsAdapter
-        adapter=WindowsAdapter(db,args.run,args.output_root,args.hwnd,allow_ocr=not args.no_ocr)
+        from workflow_browser import HybridAdapter
+        import browser_bridge
+        # Status remains read-only with respect to the page, including old runs.
+        adapter=None if args.status else HybridAdapter(db,args.run,args.output_root,args.hwnd,
+            browser_bridge.binding(db,args.run,args.browser_binding),allow_ocr=not args.no_ocr)
         runner=Runner(db,args.run,adapter,args.output_root)
         if args.status:print(json.dumps(runner.status(),ensure_ascii=False));return
         # One scheduler owns this run. No lock is acquired for individual UI actions.
@@ -606,4 +626,9 @@ def main():
         finally:db.execute('DELETE FROM workflow_owner WHERE run_id=? AND pid=?',(args.run,os.getpid()))
 
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    try:main()
+    except Exception:
+        import error_alert
+        error_alert.play()
+        raise

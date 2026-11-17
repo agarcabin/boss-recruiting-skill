@@ -54,6 +54,16 @@ def evaluate_resume(db, run_id, candidate_id, observation):
         mapped = observation
     result = coworker_progress.evaluate_for_rules(mapped, rules, at)
     if rules.get('coworker_notice_policy') == 1:
+        elapsed=(observation or {}).get('elapsed_seconds')
+        if ((observation or {}).get('state')=='unavailable' or result.get('state')=='unavailable' or
+                (observation or {}).get('evidence') == 'coworker_timeout_5s' or
+                (isinstance(elapsed,(int,float)) and elapsed>=5)):
+            return dict(result,may_continue=True,skip=False,action='continue',
+                        notice_required=False,notice_confirmed=True,
+                        reason=('coworker_timeout_skipped_silently'
+                                if isinstance(elapsed,(int,float)) and elapsed>=5 or
+                                (observation or {}).get('evidence')=='coworker_timeout_5s'
+                                else 'coworker_unavailable_skipped_silently'))
         attempted = get(db, run_id, candidate_id, 'resume_attempted') or {}
         for previous in attempted.get('observations', []):
             actual = coworker_progress.evaluate_for_rules(previous, rules, at)

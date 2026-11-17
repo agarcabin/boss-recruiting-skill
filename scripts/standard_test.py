@@ -41,10 +41,6 @@ def main():
     if args.browser_verified and len(args.browser_evidence.strip()) < 15:
         parser.error("--browser-verified requires specific --browser-evidence")
     skill = Path(__file__).resolve().parents[1]
-    mouse = skill / "scripts" / "move-click.ps1"
-    uia_query = skill / "scripts" / "uia-query.ps1"
-    resume_capture = skill / "scripts" / "resume_capture.ps1"
-    idle_mouse = skill / "scripts" / "idle_mouse.py"
     ledger = skill / "scripts" / "ledger.py"
     folder = workspace_paths.records_dir(args.output_root) / "标准化测试"
     checks = []
@@ -167,71 +163,20 @@ Test.
     checks.append(check("招聘流程测试", workflow_test))
     checks.append(check("PowerShell 7", lambda: shutil.which("pwsh") or (_ for _ in ()).throw(RuntimeError("pwsh 未安装或未在 PATH"))))
 
-    def mouse_test():
-        pwsh = shutil.which("pwsh")
-        if not pwsh:
-            raise RuntimeError("pwsh 不可用")
-        if not mouse.is_file():
-            raise RuntimeError("鼠标脚本不存在")
-        source = mouse.read_text(encoding="utf-8")
-        if "ShowWindow($WindowHandle, 9)" in source or "IsZoomed($WindowHandle)" not in source:
-            raise RuntimeError("鼠标脚本可能还原最大化窗口")
-        if "ForbiddenNames" not in source or "ForbiddenClassNames" not in source:
-            raise RuntimeError("鼠标脚本缺少危险控件拦截")
-        if "PostClickMoveMs = 1000" not in source or "Invoke-PostClickMove" not in source:
-            raise RuntimeError("鼠标脚本缺少点击后 1 秒随机移动")
-        if "clickStartedAt" not in source or "clickEndedAt" not in source:
-            raise RuntimeError("鼠标脚本缺少点击时间边界输出")
-        result = subprocess.run([pwsh, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(mouse),
-                                 "-X", "100", "-Y", "100", "-ContentBounds", "0,0,200,200", "-DryRun"],
-                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
-        if result.returncode:
-            raise RuntimeError((result.stderr or result.stdout or "mouse dry run failed")[-500:])
-        data = json.loads(result.stdout)
-        if not data.get("dryRun") or data.get("clicked"):
-            raise RuntimeError("dry run 结果异常")
-        if "clickStartedAt" not in data or "clickEndedAt" not in data or "postClickMove" not in data:
-            raise RuntimeError("dry run 缺少点击时间边界或点击后移动字段")
-        return "轨迹生成成功，未点击"
+    def browser_adapter_test():
+        import browser_bridge
+        import workflow_browser
+        sample = dict(provider='browser-plugin', browser='iab', tab_id='offline-test',
+                      url='https://www.zhipin.com/web/chat/recommend')
+        browser_bridge.validate_binding(sample)
+        if not callable(workflow_browser.HybridAdapter):
+            raise RuntimeError('HybridAdapter missing')
+        return 'HybridAdapter与插件标签页绑定格式可用；未执行页面操作'
 
-    checks.append(check("鼠标轨迹 dry run", mouse_test))
-
-    def uia_tools_test():
-        pwsh = shutil.which("pwsh")
-        if not pwsh:
-            raise RuntimeError("pwsh 不可用")
-        for script in (mouse, uia_query, resume_capture):
-            if not script.is_file():
-                raise RuntimeError(f"缺少脚本：{script.name}")
-            command = (
-                "$tokens=$null;$errors=$null;"
-                f"[void][System.Management.Automation.Language.Parser]::ParseFile('{str(script)}',[ref]$tokens,[ref]$errors);"
-                "if($errors.Count){$errors | ForEach-Object {$_.Message}; exit 1}"
-            )
-            result = subprocess.run([pwsh, "-NoProfile", "-Command", command],
-                                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
-            if result.returncode:
-                raise RuntimeError((result.stderr or result.stdout or "PowerShell parse failed")[-500:])
-        return "UIA 查询、受控点击与简历采集脚本语法通过"
-
-    checks.append(check("UIA 查询与点击脚本", uia_tools_test))
-    checks.append(check("Codex 最大化", lambda: __import__("progress_window").ensure_codex_maximized()[1] or (_ for _ in ()).throw(RuntimeError("Codex 窗口未最大化"))))
-
-    def idle_mouse_test():
-        result = subprocess.run([sys.executable, str(idle_mouse), "--x", "120", "--y", "120", "--radius", "20",
-                                 "--duration-ms", "20000", "--active-ms", "5000", "--rest-ms", "5000",
-                                 "--content-bounds", "0,0,240,240", "--dry-run"],
-                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
-        if result.returncode:
-            raise RuntimeError((result.stderr or result.stdout or "idle mouse dry run failed")[-500:])
-        data = json.loads(result.stdout)
-        if data.get("state") != "dry_run" or data.get("points", 0) < 10 or data.get("activePulses") != 2:
-            raise RuntimeError("等待鼠标 dry run 结果异常")
-        return "20 秒等待生成 2 个 5 秒移动脉冲，未移动鼠标"
-
-    checks.append(check("等待鼠标轨迹 dry run", idle_mouse_test))
-    checks.append({"name": "内置浏览器坐标与 Win32 句柄", "status": "通过" if args.browser_verified else "待核验",
-                   "detail": args.browser_evidence.strip() if args.browser_verified else "需在本机现场只读校准；opaque browser ID 不等于 HWND"})
+    checks.append(check('浏览器插件交接', browser_adapter_test))
+    checks.append({'name': '当前聊天浏览器插件标签页', 'status': '通过' if args.browser_verified else '待核验',
+                   'detail': args.browser_evidence.strip() if args.browser_verified else
+                             '需通过浏览器插件核实当前聊天iab标签页、实际BOSS URL及只读快照；不需要HWND或桌面坐标'})
     passed = all(item["status"] == "通过" for item in checks)
     cn = timezone(timedelta(hours=8))
     stamp = datetime.now(cn)

@@ -75,7 +75,7 @@ def parse(prompt,projects,at=None):
     target,max_views=run_targets.resolve(int(greeting.group(1)) if greeting else None,int(viewing.group(1)) if viewing else None)
     # Deduplicate an alias and a full-name match for the same profile.
     matches=list({str(p['profile']):p for p in matches}.values())
-    if re.fullmatch(r'菜单[：:]?1',text) or (not matches and not greeting and not viewing and not re.fullmatch(r'菜单[：:]?2',text)):
+    if re.fullmatch(r'菜单[：:]?1',text) or (not matches and not re.fullmatch(r'菜单[：:]?2',text)):
         return dict(state='menu',menu_level='home',target=target,max_views=max_views,
                     next_actions=['show_home_menu'])
     if re.fullmatch(r'菜单[：:]?2',text) or len(matches)!=1:
@@ -91,7 +91,8 @@ def parse(prompt,projects,at=None):
     return dict(state='ready_to_start',startup_mode='direct',profile=project['profile'],company=project['company'],position=project['position'],position_display=project.get('position_display',project['position']),display_name=project.get('display_name'),provenance=project.get('provenance'),
                 target=target,max_views=max_views,chat_title=f"{project['company']} {project['position']} - {at.astimezone(timezone(timedelta(hours=8))).date().isoformat()}",
                 approval_warning=project.get('approval')!='approved',views_explicit=bool(viewing),greetings_explicit=bool(greeting),
-                next_actions=['set_current_chat_title','collapse_chat_sidebar','open_boss_in_codex','confirm_already_logged_in_prompt_if_present','start_direct_run'])
+                browser_target='browser_plugin',
+                next_actions=['set_current_chat_title','open_boss_with_browser_plugin','bind_boss_uia_and_screenshot_browser','confirm_already_logged_in_prompt_if_present','start_direct_run'])
 
 
 def prepare(prompt, db_path=None, root=None):

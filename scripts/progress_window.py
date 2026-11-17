@@ -25,6 +25,7 @@ import ledger
 import daily_metrics
 from keep_awake import KeepAwake
 from report_paths import report_path
+from report_snapshot import create as report_snapshot
 
 
 CN_TZ = timezone(timedelta(hours=8))
@@ -72,6 +73,17 @@ def indicator(data):
         return 'yellow','需要前台'
     if state=='paused':return 'gray','已暂停'
     return 'green','完成当前候选人' if state=='draining' else '运行中'
+
+
+def friendly_error(value):
+    text=str(value or '')
+    for code,message in (
+        ('candidate_card_ambiguous_or_missing','卡片定位失败（目标卡不唯一），已保留实际错误并暂停该候选人。'),
+        ('coworker_timeout_5s','同事沟通记录超过5秒，已静默跳过该判断。')):
+        if code in text:return message
+    return text
+
+
 ESTIMATE_REVIEW_BASELINE = 300
 INDICATOR_DIAMETER = 52
 TEXT_LEFT = 82
@@ -305,7 +317,7 @@ def snapshot(db: sqlite3.Connection, run_id: str, output_root=None) -> dict:
     return {"state": state, "elapsed": f"{elapsed // 3600:02d}:{elapsed % 3600 // 60:02d}:{elapsed % 60:02d}",
             "foreground_required":bool(foreground_label or workflow_payload.get('foreground_required')),
             "foreground_waiting":bool(workflow_payload.get('foreground_required')),
-            "foreground_label":foreground_label,"error":workflow_payload.get('error'),
+            "foreground_label":foreground_label,"error":friendly_error(workflow_payload.get('error')),
             "warnings":workflow_payload.get('warnings',[]),"scheduler_state":workflow_payload.get('scheduler_state'),
             "current_step": step, "drain_reason":drain_reason,
             "current": active["ordinal"] if active else None, "started": progress["started"],
@@ -570,6 +582,9 @@ class ProgressWindow:
             self.button_canvas.itemconfigure(self.button_texts[2], fill="#F4F7FA")
         except (OSError, ValueError, sqlite3.Error) as exc:
             self.wake.close()
+            import error_alert
+            if getattr(self,'last_refresh_error',None)!=str(exc):error_alert.play()
+            self.last_refresh_error=str(exc)
             self.status_canvas.itemconfigure(self.state_dot, fill="#EF6262")
             self.status_canvas.itemconfigure(self.state_item, text="读取状态失败")
             self.status_canvas.itemconfigure(self.detail_item, text=str(exc)[:100])
@@ -597,6 +612,8 @@ class ProgressWindow:
             threading.Thread(target=worker,daemon=False).start()
         except (OSError, ValueError, sqlite3.Error) as exc:
             self.pausing=False
+            import error_alert
+            error_alert.play()
             messagebox.showerror("状态更新失败", str(exc))
 
     def begin_termination(self, reason):
@@ -623,10 +640,9 @@ class ProgressWindow:
                     report=stop_controller.finalize(db,self.run_id,self.output_root,
                         interrupt=not self.demo,opener=lambda _:None)
                     if report is None:raise ValueError('记录仍在由另一收尾任务整理，请稍后再次点击结束。')
-                    if stop_controller.report_status(db,self.run_id)['report_pending']:report=None
                 self.termination_result=(report,None)
             except Exception as exc: self.termination_result=(None,str(exc))
-        threading.Thread(target=worker,daemon=False).start()
+        threading.Thread(target=worker,daemon=True).start()
         self.root.after(100,self.finish_termination)
 
     def finish_termination(self):
@@ -635,6 +651,21 @@ class ProgressWindow:
             return
         report,error=self.termination_result
         if error:
+            import error_alert
+            error_alert.play()
+            # A report failure must not trap an already stopped run's window.
+            with contextlib.closing(ledger.connect(self.db_path)) as db:
+                stopped=bool(ledger.run_row(db,self.run_id)['stop_reason'])
+                if stopped:
+                    db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
+                        ('close_report_pending/'+self.run_id,error))
+            if stopped:
+                try:
+                    messagebox.showwarning('任务已停止，记录待补',
+                        '任务已停止，窗口将关闭。记录整理尚未完成，下次启动时会重新尝试。\n'+error,
+                        parent=self.root)
+                finally:self.root.destroy()
+                return
             self.terminating=False
             self.status_canvas.itemconfigure(self.state_dot,fill=SIGNAL_COLORS['red'])
             self.status_canvas.itemconfigure(self.state_item,text='关闭失败，请重试结束')
@@ -650,8 +681,12 @@ class ProgressWindow:
             with contextlib.closing(ledger.connect(self.db_path)) as db:
                 status=ledger.run_row(db,self.run_id)['interrupt_status'] or ''
             if status.startswith(('failed','not_bound')):
+                import error_alert
+                error_alert.play()
                 messagebox.showwarning('招聘已结束','招聘已停止并完成收尾，但中断当前聊天时出现问题，请检查 Codex 状态；详细原因已记录在运行结果。',parent=self.root)
             elif status=='unconfirmed':
+                import error_alert
+                error_alert.play()
                 messagebox.showwarning('招聘已结束','招聘已停止并完成收尾，但尚未确认当前聊天是否停止。请检查 Codex；若仍在运行，可手动点击停止。',parent=self.root)
         self.status_canvas.itemconfigure(self.state_item,text='已关闭')
         self.status_canvas.itemconfigure(self.detail_item,text='任务已结束，记录整理完成。')
@@ -659,27 +694,37 @@ class ProgressWindow:
             if messagebox.askyesno('招聘已结束','是否打开 Excel 招呼记录？',parent=self.root):
                 if report:
                     try:os.startfile(report)
-                    except OSError as exc:messagebox.showerror('打开 Excel 失败',str(exc),parent=self.root)
+                    except OSError as exc:
+                        import error_alert
+                        error_alert.play()
+                        messagebox.showerror('打开 Excel 失败',str(exc),parent=self.root)
                 else:
                     messagebox.showinfo('Excel 待同步','任务已结束，但 Excel 报表尚未同步完成，暂时无法打开。',parent=self.root)
         finally:self.root.destroy()
 
     def stop(self) -> None:
+        if getattr(self,'terminating',False):
+            with contextlib.closing(ledger.connect(self.db_path)) as db:
+                if ledger.run_row(db,self.run_id)['stop_reason']:
+                    db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
+                        ('close_report_pending/'+self.run_id,'window_closed_while_finalizing'))
+                    self.wake.close()
+                    self.root.destroy()
+            return
         self.begin_termination("manual_stop")
 
     def open_report(self) -> None:
         if getattr(self,'terminating',False):return
         try:
-            state = self.read()
-            if state.get('report_pending'):
-                messagebox.showinfo('简报待同步','当前简报尚未同步完成，请查看运行状态中的具体原因。若CSV已更新但展示表未就绪，请检查Excel的数据连接；程序会重试。',parent=self.root)
-                return
-            path = Path(state['report_path'])
+            with contextlib.closing(ledger.connect(self.db_path)) as db:
+                path=report_snapshot(db,self.run_id,self.output_root)
             if not path.is_file():
                 messagebox.showinfo("简报尚未生成", "处理完第一位候选人后，简报才会生成。", parent=self.root)
                 return
-            os.startfile(path)  # Windows opens the workbook with the registered Excel app.
+            os.startfile(path)
         except (OSError, ValueError, sqlite3.Error) as exc:
+            import error_alert
+            error_alert.play()
             messagebox.showerror("打开报告失败", str(exc), parent=self.root)
 
 

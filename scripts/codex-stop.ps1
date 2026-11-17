@@ -37,7 +37,7 @@ return $scope
 function Test-IdleScope($scope){
  $idleButtons=@($scope.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.PropertyCondition]::new(
   [System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Button))|Where-Object {
-   !$_.Current.IsOffscreen -and $_.Current.Name -in @('发送','发送消息','开启语音聊天','Send','Start voice chat')})
+   !$_.Current.IsOffscreen -and $_.Current.Name -in @('发送','发送消息','提交','提交提示','开启语音聊天','Send','Send message','Submit','Start voice chat')})
  return $idleButtons.Count -gt 0
 }
 $scope=Get-BoundScope
@@ -47,7 +47,8 @@ $buttonCondition=[System.Windows.Automation.AndCondition]::new(
 $buttons=@($scope.FindAll([System.Windows.Automation.TreeScope]::Descendants,$buttonCondition) | Where-Object {!$_.Current.IsOffscreen -and $_.Current.IsEnabled})
 if($buttons.Count -eq 0){
  if(Test-IdleScope $scope){@{state='idle';kind='uia';chat_marker=$b.chat_marker}|ConvertTo-Json -Compress;exit 0}
- throw 'stop_or_idle_state_unavailable'
+ # A transient/disabled composer is not proof of either failure or success.
+ @{state='unconfirmed';kind='uia';reason='stop_or_idle_state_unavailable';chat_marker=$b.chat_marker}|ConvertTo-Json -Compress;exit 0
 }
 if($buttons.Count -ne 1){throw 'unique_active_stop_button_required'}
 $invoke=$null

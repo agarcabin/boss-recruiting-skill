@@ -51,7 +51,7 @@ def version_key(value: str) -> tuple[int, int, int]:
 
 def installed_version(root: Path) -> str:
     text = (root / 'SKILL.md').read_text(encoding='utf-8-sig')
-    match = re.search(r'(?m)^  version: ["\']?([0-9.]+)["\']?\s*$', text)
+    match = re.search(r'(?m)^  version: ["\']?([0-9.]+(?:-beta)?)["\']?\s*$', text)
     if not match:
         raise ValueError('skill_version_missing')
     version_key(match[1])
@@ -299,8 +299,8 @@ def unpack(data: bytes, expected_version: str, repository: str) -> dict[str, byt
     config = json.loads(files[SOURCE].decode('utf-8'))
     if config.get('repository') != repository or config.get('schema') != 'boss-skill-update/v1':
         raise ValueError('release_update_source_changed')
-    match = re.search(rb'(?m)^  version: ["\']?([0-9.]+)["\']?\s*$', files['SKILL.md'])
-    if not match or match[1].decode() != release_base_version(expected_version):
+    match = re.search(rb'(?m)^  version: ["\']?([0-9.]+(?:-beta)?)["\']?\s*$', files['SKILL.md'])
+    if not match or match[1].decode() not in (expected_version, release_base_version(expected_version)):
         raise ValueError('release_skill_version_mismatch')
     return files
 

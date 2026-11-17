@@ -3,7 +3,18 @@ import contextlib,json,sqlite3
 from pathlib import Path
 import local_mutex
 
-BUILD_ID='1.4.10'
+def installed_build_id():
+    manifest = Path(__file__).resolve().parents[1] / 'release-manifest.json'
+    try:
+        value = json.loads(manifest.read_text(encoding='utf-8-sig')).get('version')
+        if value:
+            return str(value)
+    except (OSError, json.JSONDecodeError):
+        pass
+    return '1.4.10'
+
+
+BUILD_ID=installed_build_id()
 
 def path(db):return str(Path(db.execute('PRAGMA database_list').fetchone()[2]).resolve())
 def key(db):return 'install-admission:'+path(db).casefold()

@@ -16,27 +16,19 @@
 
 无时区的完整日期时间按北京时间UTC+08:00解释。只接受带年份且有时分的时间，不猜测“昨天”或缺少年份的日期。本规则优先于岗位文件中历史“近7天已沟通跳过/备选”及本地姓名去重说明；不用修改历史已确认岗位文件。
 
-## 定向读取与判定
+## 浏览器插件读取与判定
 
-先以最新UIA定向核实并按需选择“同事沟通进度”页签；需要点击时，按[点击方式开关](click-modes.md)执行：拟人轨迹开启用原鼠标流程，关闭用UIA InvokePattern，不移动鼠标。不得仅因截图上曾显示该页签就传已确认。随后运行只读提取器：
+1.4.16-beta 使用后台 UIA 定向读取同事面板、按需 Invoke “同事沟通进度”并核实已选中，再读取实际时间与完整性。不读取“我的沟通进度”，不产生浏览器交接，也不自动前置窗口。查询、点击和重试合计5秒；超过5秒，或面板不可读/读取失败，都立即静默继续，不创建对话回执、不逐人提醒，也不能改写为无记录。
 
-```powershell
-pwsh -NoProfile -File scripts/read-coworker-progress.ps1 -WindowHandle <当前HWND> -CoworkerTabConfirmed |
-  Set-Content -LiteralPath <当前候选人-coworker.json> -Encoding utf8
-python scripts/coworker_progress.py --input <当前候选人-coworker.json>
-```
+查询、点击和重试累计5秒；超过5秒统一记录超时并静默继续，不逐人提示。
 
-提取器先在唯一可见的BOSS文档里定向定位“同事沟通进度”标题；无标题时，在实际存在的主推荐、推荐iframe和简历iframe分别定向复查并按RuntimeId去重。面板读取限制最多6层小范围祖先、120个文本节点；不提升为整页扫描。按控件纵向位置读取各条“向Ta发起沟通”，逐条关联日期并返回records及records_complete；存在未读记录记不完整。已确认近期联系可直接跳过，全部旧记录则必须完整才能继续。默认文档URL模式是`*zhipin.com/web/chat/recommend*`；实测文档不同时使用本轮UIA实际返回的URL模式。提取器只读、不点击、不滚动，不使用CUA、DOM、网页脚本、导航或刷新；完整查找确实未发现标题才返回not_found，文档/数据异常返回unavailable。
-
-观测JSON契约示例：
+返回 state 为 records、兼容旧 first_record、empty、not_found 或 unavailable。实际记录采用 records:[{greeting_at,evidence}] 及 records_complete:true/false；完整查找确实无面板才返回 not_found、lookup_completed:true。明确读到空面板才返回 empty。任何未读滚动/隐藏记录、模糊时间或文档失联都如实记录，不伪造完整。
 
 ```json
-{"state":"records","records":[{"greeting_at":"2026-10-20 09:22","evidence":"实际记录"}],"records_complete":true,"evidence":"UIA：完整检查同事沟通进度"}
+{"state":"records","records":[{"greeting_at":"2026-10-20 09:22","evidence":"实际记录原文"}],"records_complete":true,"lookup_completed":true,"evidence":"本次实际观察"}
 ```
 
-`state`为`records`、兼容旧`first_record`、`empty`、`not_found`或`unavailable`。新读取记录使用 `records:[{greeting_at,evidence}]`、`records_complete:true/false`；`first_greeting_at`保留作展示兼容。`not_found`必须有`lookup_completed:true`及实际查询证据；只有明确读到空面板才用`empty`。`evidence`描述当前候选人的实际观察，不能照抄示例。旧`unavailable`历史记录不自动改判。
-
-页签未找到时可省略 `-CoworkerTabConfirmed`：提取器只读检查实际存在的文档，完整查找仍无标题才输出 `not_found`。标题存在但未确认选中时返回 `unavailable`；不得虚传已确认。URL匹配不到唯一可见起始文档也返回 `unavailable`。
+可用 coworker_progress.py 在本地判定结果，它不执行页面动作。阈值以当前岗位与运行快照为准；配置0时不查询。原有近期记录优先跳过及未知逐人通知规则保留。
 
 ## 逐人留痕
 

@@ -11,12 +11,13 @@ class StartupMenuTests(unittest.TestCase):
         from quick_start import parse
         for prompt in ('开始打招呼','帮我打招呼','菜单1','菜单 1'):
             self.assertEqual(parse(prompt,self.projects())['state'],'menu')
-    def test_menu_two_and_count_only_select_company(self):
+    def test_menu_two_selects_company_and_count_only_shows_home(self):
         from quick_start import parse
-        for prompt in ('菜单2','菜单 2','帮我打50个'):
+        for prompt in ('菜单2','菜单 2'):
             result=parse(prompt,self.projects())
             self.assertEqual((result['state'],result['selection_level']),('needs_selection','company'))
-        self.assertEqual(parse('帮我打50个',self.projects())['target'],50)
+        result=parse('帮我打50个',self.projects())
+        self.assertEqual((result['state'],result['target']),('menu',50))
     def test_unique_company_prefix_starts_with_requested_count(self):
         from quick_start import parse
         result=parse('帮我打Sample50个',self.projects())
@@ -67,6 +68,12 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(hit_summary.display('实际普通评语'),'实际普通评语')
     def test_nested_unique(self):
         self.assertEqual(hit_summary.words(dict(hits=[dict(word='x'),dict(word='x'),dict(evidence=[dict(company='y')])])),['x','y'])
+    def test_single_dictionary_uses_unprefixed_label(self):
+        hits=[dict(word='组装',group='A'),dict(word='装配',group='A')]
+        self.assertEqual(hit_summary.grouped(hits),'词库：组装、装配')
+    def test_multiple_dictionaries_keep_group_labels(self):
+        hits=[dict(word='仓管',group='A'),dict(word='Excel',group='B')]
+        self.assertEqual(hit_summary.grouped(hits),'A组：仓管；B组：Excel')
 
 class AdmissionTests(unittest.TestCase):
     def setUp(self):

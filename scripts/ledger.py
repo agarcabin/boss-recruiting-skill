@@ -406,8 +406,10 @@ def start(db,args):
 
 _start_unprotected=start
 def start(db,args):
-    import run_admission
-    with run_admission.start(db):return _start_unprotected(db,args)
+    import run_admission,run_cleanup,local_mutex
+    with local_mutex.locked('recruiting-startup:'+run_admission.path(db).casefold()):
+        run_cleanup.close_previous(db)
+        with run_admission.start(db):return _start_unprotected(db,args)
 
 
 def status(db: sqlite3.Connection, args: argparse.Namespace) -> None:

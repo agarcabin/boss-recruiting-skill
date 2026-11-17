@@ -21,6 +21,15 @@ def snapshot(db, run_id):
                   error=data.get('error'))
     if control != 'running':
         return result
+    import browser_bridge
+    browser_request = browser_bridge.pending(db, run_id)
+    if browser_request:
+        try:
+            browser_bridge.live(db, browser_request)
+        except (OSError, RuntimeError, ValueError) as exc:
+            return dict(result, state='needs_attention', error=str(exc))
+        return dict(result, state='needs_browser', request_file=browser_request['request_file'],
+                    response_file=browser_request['response_file'], request=browser_request)
     kind = data.get('handoff_kind')
     request, response = data.get('request_file'), data.get('response_file')
     if kind and request and response:

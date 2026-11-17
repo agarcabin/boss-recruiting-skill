@@ -96,11 +96,12 @@ function Invoker($node){
  return $null
 }
 if($Action -eq 'CardOpen'){
- $cc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ClassNameProperty,'card-item')
  $hits=@();$seen=[Collections.Generic.HashSet[string]]::new()
  foreach($doc in $docs){
   if($doc.url -like '*c-resume*'){continue}
-  foreach($card in $doc.element.FindAll([System.Windows.Automation.TreeScope]::Descendants,$cc)){
+  foreach($card in $doc.element.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition)){
+   $classes=$card.Current.ClassName -split '\s+'
+   if(!($classes -contains 'card-item') -and !($classes -contains 'candidate-card-wrap')){continue}
    $rid=$card.GetRuntimeId() -join ','
    if($rid -ne $CardRuntime -or $card.Current.IsOffscreen -or !$seen.Add($rid)){continue}
    $open=Invoker $card
@@ -118,8 +119,8 @@ if($Action -eq 'Select'){
   if($doc.url -like '*c-resume*'){continue}
   $cc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ClassNameProperty,'card-item')
   foreach($card in $doc.element.FindAll([System.Windows.Automation.TreeScope]::Descendants,$cc)){
-   $rid=$card.GetRuntimeId() -join ','
-   if($card.Current.IsOffscreen -or !$seen.Add($rid)){continue}
+   if($card.Current.IsOffscreen){continue}
+   if($card.Current.Name -match '当前职位可升级曝光效果|您的职位更新未满24小时|去升级|热搜牛人推荐|查看更多'){continue}
    $ancestor=$card;$scrollPercent=-1
    for($depth=0;$ancestor -and $depth -lt 10;$depth++){
     $sp=$null
@@ -130,19 +131,40 @@ if($Action -eq 'Select'){
     }
     $ancestor=[System.Windows.Automation.TreeWalker]::RawViewWalker.GetParent($ancestor)
    }
-   $ordered+=,$rid
-   if($rid -in $skip){continue}
-   $wrapped=$card.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition)
-   $viewed=@($wrapped|Where-Object {$_.Current.ClassName -match '\b(candidate-card-wrap|card-inner)\b.*\bhas-viewed\b'}).Count -gt 0
-   if($viewed){continue}
-   $nameNode=@($wrapped|Where-Object {$_.Current.ClassName -match '(^|[- ])name($|[- ])' -and $_.Current.Name -and $_.Current.Name.Length -lt 35}|Select-Object -First 1)
-   $avatarName=@($wrapped|Where-Object {$_.Current.ClassName -eq 'avatar' -and $_.Current.Name -and $_.Current.Name.Length -lt 35 -and $_.Current.Name -notmatch '(?i)头像|图片|说明|avatar|profile'}|Select-Object -First 1)
-   $name=if($nameNode.Count){$nameNode[0].Current.Name}elseif($avatarName.Count){$avatarName[0].Current.Name}else{'姓名未暴露·卡片'+($cards.Count+1)}
-   $open=Invoker $card
-   $rect=$card.Current.BoundingRectangle;$viewport=$doc.element.Current.BoundingRectangle
-   $business='';$aid=$card.Current.AutomationId
-   if($aid -match '^(?:geek|candidate|resume)[-_]([A-Za-z0-9_-]{12,})$'){$business=$Matches[1]}
-   $cards+=@{candidate_id=$(if($business){'boss-geek:'+$business}else{'uia-card:'+$rid});business_id=$business;candidate_name=$name;card_runtime=$rid;card_target=(Target $card $doc.url);open_target=$(if($open){Target $open $doc.url}else{$null});hwnd=$WindowHandle;summary=$card.Current.Name;scroll_percent=$scrollPercent;bounds=@{x=$rect.X;y=$rect.Y;width=$rect.Width;height=$rect.Height};fully_visible=($rect.Left -ge $viewport.Left -and $rect.Right -le $viewport.Right -and $rect.Top -ge $viewport.Top -and $rect.Bottom -le $viewport.Bottom)}
+   $units=@();$child=[System.Windows.Automation.TreeWalker]::RawViewWalker.GetFirstChild($card)
+   while($child){
+    if(($child.Current.ClassName -split '\s+') -contains 'candidate-card-wrap'){$units+=,$child}
+    $child=[System.Windows.Automation.TreeWalker]::RawViewWalker.GetNextSibling($child)
+   }
+   if(!$units.Count){$units=@($card)}
+   $viewport=$doc.element.Current.BoundingRectangle
+   foreach($unit in $units){
+    $rid=$unit.GetRuntimeId() -join ','
+    if(!$seen.Add($rid)){continue}
+    $ordered+=,$rid
+    if($rid -in $skip){continue}
+    $wrapped=$unit.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition)
+    $viewed=@($wrapped|Where-Object {$_.Current.ClassName -match '\b(candidate-card-wrap|card-inner)\b.*\bhas-viewed\b'}).Count -gt 0 -or $unit.Current.ClassName -match '\bhas-viewed\b'
+    if($viewed){continue}
+    $nameNode=@($wrapped|Where-Object {$_.Current.ClassName -match '(^|[- ])name($|[- ])' -and $_.Current.Name -and $_.Current.Name.Length -lt 35}|Select-Object -First 1)
+    $avatarName=@($wrapped|Where-Object {$_.Current.ClassName -eq 'avatar' -and $_.Current.Name -and $_.Current.Name.Length -lt 35 -and $_.Current.Name -notmatch '(?i)头像|图片|说明|avatar|profile'}|Select-Object -First 1)
+    $actionButton=@($wrapped|Where-Object {$_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button -and $_.Current.Name -in @('打招呼','继续沟通','继续打招呼')}|Select-Object -First 1)
+    $fallbackName=@($wrapped|Where-Object {$_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Text -and $_.Current.Name}|ForEach-Object {
+      $candidateName=($_.Current.Name -replace '\s*[.。]\s*要获取缺失的图片说明.*$','').Trim()
+      if($candidateName -and $candidateName -notmatch '^(面议|\d.*K|\d+岁|\d+年|.*活跃$|初中及以下|高中|中专/中技|大专|本科|离职-|在职-|温州|普工|组装|操作工|打招呼)$' -and $candidateName.Length -lt 30){$candidateName}
+    }|Select-Object -First 1)
+    if(!$nameNode.Count -and !$avatarName.Count -and !$actionButton.Count){continue}
+    $name=if($nameNode.Count){$nameNode[0].Current.Name}elseif($avatarName.Count){$avatarName[0].Current.Name}elseif($fallbackName.Count){$fallbackName[0]}else{'姓名未暴露·卡片'+($cards.Count+1)}
+    $open=Invoker $unit
+    $rect=$unit.Current.BoundingRectangle
+    $business='';$aid=$unit.Current.AutomationId
+    if($aid -match '^(?:geek|candidate|resume)[-_]([A-Za-z0-9_-]{12,})$'){$business=$Matches[1]}
+    $visibleWidth=[math]::Max(0,[math]::Min($rect.Right,$viewport.Right)-[math]::Max($rect.Left,$viewport.Left))
+    $visibleHeight=[math]::Max(0,[math]::Min($rect.Bottom,$viewport.Bottom)-[math]::Max($rect.Top,$viewport.Top))
+    $summary=($wrapped|Where-Object {$_.Current.Name}|ForEach-Object {$_.Current.Name}) -join "`n"
+    if(!$summary){$summary=$card.Current.Name}
+    $cards+=@{candidate_id=$(if($business){'boss-geek:'+$business}else{'uia-card:'+$rid});business_id=$business;candidate_name=$name;card_runtime=$rid;card_target=(Target $unit $doc.url);open_target=$(if($open){Target $open $doc.url}else{$null});hwnd=$WindowHandle;summary=$summary;readable_text=$summary;scroll_percent=$scrollPercent;bounds=@{x=$rect.X;y=$rect.Y;width=$rect.Width;height=$rect.Height};fully_visible=($visibleWidth -gt 0 -and $visibleHeight -gt 0)}
+   }
   }
  }
  if($cards.Count){$cards=@($cards|Sort-Object @{Expression={[math]::Round($_.bounds.y/18)}},@{Expression={$_.bounds.x}});@{state='candidate';candidate=$cards[0];candidates=$cards;scroll_target=$(if($scroll.Count){$scroll[0]}else{$null});ordered_runtime_ids=$ordered;resume_open=(@($docs|Where-Object {$_.url -like '*c-resume*'}).Count -gt 0)}|ConvertTo-Json -Depth 7 -Compress}
@@ -184,7 +206,7 @@ if($Action -in @('Resume','ResumeFull')){
   $tp=$null
   if($doc.element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern,[ref]$tp)){
    $full=$tp.DocumentRange.GetText(-1)
-   if($full){$resumeText=$full;$complete=$true}
+   if($full){$resumeText=(@($resumeText,$full)|Where-Object {$_}) -join "`n";$complete=$true}
   }
  }
  if($Action -eq 'ResumeFull' -and !$complete){
@@ -230,7 +252,10 @@ if($Action -in @('Resume','ResumeFull')){
  # The user-visible right-hand employment overview can be sufficient for a direct
  # employer/role match. Read that bounded panel before considering a long OCR.
  foreach($doc in $docs|Where-Object {$_.url -notlike '*c-resume*'}){
-  $hc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,'经历概览')
+  $sectionConditions=[System.Windows.Automation.Condition[]]@('经历概览','期望职位','期望岗位','求职期望','个人优势','工作经历','教育经历','项目经历','实习经历','自我评价','专业技能','资格证书'|ForEach-Object {
+   [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,$_)
+  })
+  $hc=[System.Windows.Automation.OrCondition]::new($sectionConditions)
   foreach($header in $doc.element.FindAll([System.Windows.Automation.TreeScope]::Descendants,$hc)){
    if($header.Current.IsOffscreen){continue}
    $panel=$header;$walker=[System.Windows.Automation.TreeWalker]::RawViewWalker

@@ -41,7 +41,7 @@ def output(**items: object) -> None:
 
 def installed_metadata():
     text=(SKILL_ROOT/'SKILL.md').read_text(encoding='utf-8-sig')
-    match=re.search(r'(?m)^  version:\s*["\']?([0-9.]+)',text)
+    match=re.search(r'(?m)^  version:\s*["\']?([0-9.]+(?:-[0-9A-Za-z.-]+)?)',text)
     if not match:raise ValueError('skill_version_missing')
     updated=re.search(r'(?m)^  updated_at:\s*["\']?(\d{4}-\d{2}-\d{2})',text)
     if not updated:raise ValueError('skill_updated_at_missing')

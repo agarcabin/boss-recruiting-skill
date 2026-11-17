@@ -20,6 +20,7 @@ Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 . (Join-Path $PSScriptRoot 'boss-browser-binding.ps1')
 . (Join-Path $PSScriptRoot 'native-json.ps1')
+. (Join-Path $PSScriptRoot 'resume-single-page.ps1')
 
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
@@ -68,6 +69,7 @@ function Invoke-CaptureGuard([scriptblock]$Action) {
 }
 
 $script:CaptureResumeDocument = $null
+$script:StaticResumeSignature = $null
 function Find-ResumeDocument {
     $root = (Get-BossBrowserRoot $WindowHandle)
     if ($null -eq $root) {
@@ -207,6 +209,7 @@ function Get-ResumeScrollContext {
                 wrapper = $best[0].element
                 pattern = $best[0].pattern
                 locator = $best[0].locator
+                scrollable = $true
             }
         }
         return [ordered]@{
@@ -215,10 +218,36 @@ function Get-ResumeScrollContext {
             candidates = $best.Count
         }
     }
-    return [ordered]@{
-        present = $false
-        reason = "resume_scroll_target_missing_after_layer_fallbacks"
+    # A short resume may expose no ScrollPattern at all. Verify the entire
+    # bounded resume viewport instead of treating that as a capture failure.
+    $scrollNodes=@($resume)+@($resume.FindAll([System.Windows.Automation.TreeScope]::Descendants,
+        [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::IsScrollPatternAvailableProperty,$true)))
+    foreach($node in $scrollNodes){
+        $pattern=$null
+        if($node.TryGetCurrentPattern([System.Windows.Automation.ScrollPattern]::Pattern,[ref]$pattern) -and
+           ($pattern.Current.VerticallyScrollable -or $pattern.Current.HorizontallyScrollable)) {
+            return @{present=$false;reason='resume_unresolved_scrollable_content'}
+        }
     }
+    $rect=$resume.Current.BoundingRectangle
+    $hostRect=(Get-BossBrowserRoot $WindowHandle).Current.BoundingRectangle
+    $viewport=@{left=[math]::Max($screen.Left,$hostRect.Left);top=[math]::Max($screen.Top,$hostRect.Top)}
+    $viewport.width=[math]::Min($screen.Right,$hostRect.Right)-$viewport.left
+    $viewport.height=[math]::Min($screen.Bottom,$hostRect.Bottom)-$viewport.top
+    $condition=[System.Windows.Automation.OrCondition]::new(
+        [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Text),
+        [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Image))
+    $nodes=@($resume.FindAll([System.Windows.Automation.TreeScope]::Descendants,$condition)|ForEach-Object {
+        $r=$_.Current.BoundingRectangle
+        @{name=$_.Current.Name;offscreen=$_.Current.IsOffscreen;left=$r.Left;top=$r.Top;width=$r.Width;height=$r.Height}
+    })
+    $observation=@{scrollable=$false;document=@{left=$rect.Left;top=$rect.Top;width=$rect.Width;height=$rect.Height};viewport=$viewport;nodes=$nodes}
+    $checked=Test-ResumeSinglePage $observation
+    if (!$checked.complete) { return @{present=$false;reason=$checked.reason} }
+    $signature=$observation|ConvertTo-Json -Depth 6 -Compress
+    if ($script:StaticResumeSignature -and $script:StaticResumeSignature -ne $signature) { throw 'resume_content_changed_during_capture' }
+    $script:StaticResumeSignature=$signature
+    return @{present=$true;resume=$resume;wrapper=$resume;pattern=$null;scrollable=$false;locator=$checked.reason}
 }
 
 function Set-ResumeScrollPercent([double]$Percent) {
@@ -226,6 +255,7 @@ function Set-ResumeScrollPercent([double]$Percent) {
     if (-not $context.present) {
         throw $context.reason
     }
+    if (!$context.scrollable) { return $context }
     Invoke-CaptureGuard {
         Assert-BossBrowserTarget $context.wrapper $WindowHandle
         $context.pattern.SetScrollPercent([System.Windows.Automation.ScrollPattern]::NoScroll,$Percent)
@@ -292,6 +322,7 @@ function Save-Screenshot([string]$Path, $Geometry) {
            break
           } catch {
            if($_.Exception.Message -notmatch 'bound_codex_iab_not_foreground' -or $attempt -eq 1){throw}
+           Request-BossForeground
           }
         }
     }
@@ -305,11 +336,11 @@ Request-BossForeground
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 $startedAt = Get-Date
 $top = Set-ResumeScrollPercent 0
-if ([double]$top.pattern.Current.VerticalScrollPercent -gt 0.2) {
+if ($top.scrollable -and [double]$top.pattern.Current.VerticalScrollPercent -gt 0.2) {
     throw "resume_not_at_top"
 }
-$viewSizePercent = [double]$top.pattern.Current.VerticalViewSize
-if ($viewSizePercent -le 0 -or $viewSizePercent -ge 100) {
+$viewSizePercent = if ($top.scrollable) {[double]$top.pattern.Current.VerticalViewSize} else {100.0}
+if ($viewSizePercent -le 0 -or ($top.scrollable -and $viewSizePercent -ge 100)) {
     throw "unexpected_resume_view_size"
 }
 
@@ -328,13 +359,14 @@ for ($page = 1; $page -le $MaxPages; $page++) {
     if (-not $context.present) {
         throw $context.reason
     }
-    $currentPercent = [double]$context.pattern.Current.VerticalScrollPercent
+    if ($context.scrollable -ne $top.scrollable) {throw 'resume_content_changed_during_capture'}
+    $currentPercent = if ($context.scrollable) {[double]$context.pattern.Current.VerticalScrollPercent} else {0.0}
     $offset = [int][math]::Round($scrollRange * ($currentPercent / 100.0))
     $path = Join-Path $OutputDir ("resume-page-{0:D2}.png" -f $page)
     Save-Screenshot $path $geometry
     $pagePaths.Add($path)
     $offsets.Add($offset)
-    if ($currentPercent -ge 99.9) {
+    if (!$context.scrollable -or $currentPercent -ge 99.9) {
         $bottomConfirmed = $true
         break
     }
@@ -386,6 +418,8 @@ $result = [ordered]@{
     viewSizePercent = [math]::Round($viewSizePercent, 4)
     scrollStepPercent = [math]::Round($stepPercent, 4)
     bottomConfirmed = $bottomConfirmed
+    captureMode = $(if ($top.scrollable) {'scrolling'} else {'single_page'})
+    completenessEvidence = $(if ($top.scrollable) {'scrolled_to_bottom'} else {'single_page_pending_ocr_bottom_marker'})
     pageFilesRemoved = $pageFilesRemoved
 }
 $resultJson = $result | ConvertTo-Json -Depth 6
