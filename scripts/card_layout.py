@@ -1,4 +1,18 @@
 """Visual row ordering and visit-local identity; a name is never a unique ID."""
+PROMO_MARKERS=('热搜牛人推荐','广告牛人推荐','广告推荐')
+PROMO_CLASS='anonymous-geek-guide-card'
+
+
+def promo(card):
+    if card.get('ad_badge'):return True
+    text=' '.join(str(card.get(key) or '') for key in ('candidate_name','summary'))
+    if any(marker in text for marker in PROMO_MARKERS):return True
+    for key in ('card_target','open_target'):
+        target=card.get(key) or {}
+        if PROMO_CLASS in str(target.get('class_name') or ''):return True
+    return False
+
+
 def ordered(cards, tolerance=18):
     rows=[]
     for card in sorted(cards,key=lambda c:(c['bounds']['y'],c['bounds']['x'])):
@@ -12,6 +26,7 @@ def choose(cards, processed):
     history=[p for p in processed if isinstance(p,dict)]
     legacy={p for p in processed if isinstance(p,str)}
     for card in ordered(cards):
+        if promo(card):continue
         if card['card_runtime'] in legacy:continue
         done=False
         for old in history:

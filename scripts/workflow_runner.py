@@ -625,6 +625,7 @@ def main():
                 if alive:raise ValueError('runner_already_running')
             db.execute('INSERT OR REPLACE INTO workflow_owner VALUES (?,?,?)',(args.run,os.getpid(),run_safety.process_birth(os.getpid())))
         try:
+            page_retries=0
             while True:
                 result=runner.advance()
                 if result['state']=='complete':
@@ -633,7 +634,12 @@ def main():
                     stop_controller.finalize(db,args.run,args.output_root,interrupt=False)
                     result.update(stop_controller.report_status(db,args.run))
                 if not args.worker:print(json.dumps(result,ensure_ascii=False));break
-                if result['state'] in ('complete','stopped','needs_attention','needs_page'):break
+                if result['state'] in ('complete','stopped','needs_attention'):break
+                if result['state']=='needs_page':
+                    page_retries+=1
+                    if page_retries>3:break
+                    time.sleep(1);continue
+                page_retries=0
                 time.sleep(1 if result['state']=='rate_limited' else .5 if result['state']!='candidate_complete' else 0)
         finally:db.execute('DELETE FROM workflow_owner WHERE run_id=? AND pid=?',(args.run,os.getpid()))
 

@@ -95,19 +95,23 @@ class WindowsAdapter:
             )
             self.db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',('boss_page_job/'+self.run,json.dumps(observed,ensure_ascii=False)))
             self.page_job_recorded=True
-        for attempt in range(3):
+        for attempt in range(12):
             result=self.query('Select',processed=processed)
             if result['state']=='candidate':
+                import card_layout
+                candidates=[card for card in result.get('candidates',[result['candidate']]) if not card_layout.promo(card)]
                 if rules.get('page_layout_policy'):
-                    import card_layout
-                    candidate=card_layout.choose(result.get('candidates',[result['candidate']]),processed)
+                    candidate=card_layout.choose(candidates,processed)
                     if candidate and not candidate.get('fully_visible',True):
-                        self.invoke(candidate['card_target'],'Reveal');time.sleep(.2);continue
+                        self.invoke(candidate['card_target'],'Reveal');time.sleep(.5);continue
                     if candidate:self.hwnd=candidate['hwnd'];return candidate
                 else:
-                    candidate=result['candidate'];self.hwnd=candidate['hwnd'];return candidate
+                    candidate=candidates[0] if candidates else None
+                    if candidate:self.hwnd=candidate['hwnd'];return candidate
             if result.get('scroll_target'):
-                self.invoke(result['scroll_target'],'Scroll');time.sleep(.2)
+                self.invoke(result['scroll_target'],'Scroll');time.sleep(.5)
+            elif attempt<2:
+                time.sleep(.5)
             else:return None
         return None
 

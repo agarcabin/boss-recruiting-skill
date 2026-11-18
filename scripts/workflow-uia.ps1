@@ -125,7 +125,7 @@ if($Action -eq 'Select'){
   $cc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ClassNameProperty,'card-item')
   foreach($card in $doc.element.FindAll([System.Windows.Automation.TreeScope]::Descendants,$cc)){
    if($card.Current.IsOffscreen){continue}
-   if($card.Current.Name -match '当前职位可升级曝光效果|您的职位更新未满24小时|去升级|热搜牛人推荐|查看更多'){continue}
+   if($card.Current.Name -match '当前职位可升级曝光效果|您的职位更新未满24小时|去升级|热搜牛人推荐|广告牛人推荐|广告.*牛人推荐|广告推荐|查看更多'){continue}
    $ancestor=$card;$scrollPercent=-1
    for($depth=0;$ancestor -and $depth -lt 10;$depth++){
     $sp=$null
@@ -146,9 +146,12 @@ if($Action -eq 'Select'){
    foreach($unit in $units){
     $rid=$unit.GetRuntimeId() -join ','
     if(!$seen.Add($rid)){continue}
+    if(($unit.Current.ClassName -split '\s+') -contains 'anonymous-geek-guide-card'){continue}
+    if($unit.Current.Name -eq '广告'){continue}
+    $wrapped=$unit.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition)
+    if(@($wrapped|Where-Object {$_.Current.Name -eq '广告'}).Count){continue}
     $ordered+=,$rid
     if($rid -in $skip){continue}
-    $wrapped=$unit.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition)
     $viewed=@($wrapped|Where-Object {$_.Current.ClassName -match '\b(candidate-card-wrap|card-inner)\b.*\bhas-viewed\b'}).Count -gt 0 -or $unit.Current.ClassName -match '\bhas-viewed\b'
     if($viewed){continue}
     $nameNode=@($wrapped|Where-Object {$_.Current.ClassName -match '(^|[- ])name($|[- ])' -and $_.Current.Name -and $_.Current.Name.Length -lt 35}|Select-Object -First 1)
