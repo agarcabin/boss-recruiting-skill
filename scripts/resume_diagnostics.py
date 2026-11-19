@@ -4,14 +4,34 @@ import functools
 import json
 import sqlite3
 import subprocess
+from windows_process import decode_output
+
+NORMAL='正常情况'
+BUG='意外情况（BUG）'
+
+
+def is_program_bug(text):
+    return any(code in text for code in ('UnicodeDecodeError','SyntaxError','NameError','KeyError','TypeError','AttributeError','AccessViolation','segmentation fault'))
+
+
+def classification(error,normal=None):
+    text=reason(error) if isinstance(error,BaseException) else str(error)
+    # A real program exception must not be hidden by a cancellation word in its traceback.
+    if is_program_bug(text):
+        return BUG
+    normal=getattr(error,'normal',normal)
+    if normal is not None:return NORMAL if normal else BUG
+    expected=('bound_codex_iab_not_foreground','boss_window_not_foreground',
+              'resume_capture_geometry_changed','resume_capture_occluded_by_recommendations',
+              'helper_cancelled','capture_run_stopped','截图区域已改变','截图采集已暂停')
+    return NORMAL if any(code in text for code in expected) else BUG
 
 
 def reason(error):
     text = str(error)
     if isinstance(error, subprocess.CalledProcessError):
         detail = error.stderr or error.stdout or ''
-        if isinstance(detail, bytes):
-            detail = detail.decode('utf-8-sig', errors='replace')
+        detail=decode_output(detail)
         text = f'子进程退出码 {error.returncode}；{detail.strip() or "未返回错误输出"}'
     elif isinstance(error, PermissionError):
         text = '没有写入权限，或文件被占用：' + text
@@ -20,18 +40,21 @@ def reason(error):
     return (type(error).__name__ + '：' + text)[-3000:]
 
 
-def record(db, run_id, candidate_id, stage, error):
+def record(db, run_id, candidate_id, stage, error,event='resume_save_failed'):
     if not isinstance(db, sqlite3.Connection):
         return  # Offline capture fixtures can supply a non-database stub.
     import ledger
     digest = ledger.run_candidate_hash(db, run_id, candidate_id)
-    detail = json.dumps(dict(candidate_id=candidate_id, candidate_hash=digest, stage=stage,
+    detail = json.dumps(dict(candidate_id=candidate_id, candidate_hash=digest, stage=stage,classification=classification(error),
                              reason=reason(error) if isinstance(error, BaseException) else str(error)),
                         ensure_ascii=False)
-    if not db.execute("SELECT 1 FROM run_audit WHERE run_id=? AND event='resume_save_failed' AND detail=?",
-                      (run_id, detail)).fetchone():
+    if not db.execute("SELECT 1 FROM run_audit WHERE run_id=? AND event=? AND detail=?",
+                      (run_id,event,detail)).fetchone():
+        if event!='resume_interrupted':
+            import error_alert
+            error_alert.play()
         db.execute('INSERT INTO run_audit(run_id,at,event,detail) VALUES (?,?,?,?)',
-                   (run_id, ledger.iso(ledger.now()), 'resume_save_failed', detail))
+                   (run_id, ledger.iso(ledger.now()),event,detail))
 
 
 def append_sheet(wb, db, profile, at, run_id=None, report_rows=None):
@@ -44,7 +67,7 @@ def append_sheet(wb, db, profile, at, run_id=None, report_rows=None):
     zone = timezone(timedelta(hours=8))
     day = datetime.fromisoformat(at).astimezone(zone).date()
     events = db.execute('''SELECT a.*,r.profile_path FROM run_audit a JOIN runs r ON r.run_id=a.run_id
-        WHERE event='resume_save_failed' ORDER BY a.id''')
+        WHERE event IN ('resume_save_failed','resume_interrupted','workflow_error') ORDER BY a.id''')
     for event in events:
         if run_id and event['run_id']!=run_id:continue
         member=db.execute('SELECT job FROM run_identity WHERE run_id=?',(event['run_id'],)).fetchone()
@@ -60,7 +83,16 @@ def append_sheet(wb, db, profile, at, run_id=None, report_rows=None):
             continue
         ws.append([datetime.fromisoformat(event['at']).astimezone(zone).strftime('%Y-%m-%d %H:%M:%S'),
                    event['run_id'], row['candidate_name'] if row else data['candidate_id'],
-                   data['stage'], '保存失败（已记录）', data['reason']])
+                   data['stage'], data.get('classification') or classification(data['reason']), data['reason']])
+    # Stop state is durable even when its helper was cancelled before recording a candidate.
+    stopped=db.execute('''SELECT r.run_id,c.updated_at FROM runs r
+        JOIN run_control c ON c.run_id=r.run_id JOIN run_identity i ON i.run_id=r.run_id
+        WHERE i.job=? AND r.stop_reason='manual_stop' ORDER BY c.updated_at''',(identity,))
+    for event in stopped:
+        if run_id and event['run_id']!=run_id:continue
+        stamp=datetime.fromisoformat(event['updated_at']).astimezone(zone)
+        if not run_id and stamp.date()!=day:continue
+        ws.append([stamp.strftime('%Y-%m-%d %H:%M:%S'),event['run_id'],'','任务控制',NORMAL,'用户手动结束任务，正常退出。'])
     # Include manual missing-file reasons and older records lacking structured events.
     import daily_metrics
     for row in report_rows if report_rows is not None else daily_metrics.rows(db, profile, at):
@@ -70,17 +102,18 @@ def append_sheet(wb, db, profile, at, run_id=None, report_rows=None):
         if not row['resume_image_path'] and row['resume_archive_status']!='missing':
             trigger=json.loads(row['eligibility_json'] or '{}').get('trigger')
             if trigger not in ('coworker_skip','coworker_unknown'):
-                note=payload.get('resume_save_note')
+                list_only=payload.get('evaluation_stage')=='list' or payload.get('worker_stage')=='list'
+                note=payload.get('resume_save_note') or ('列表初筛结束，未打开电子简历，无需截图。' if list_only else None)
                 ws.append([datetime.fromisoformat(row['updated_at']).astimezone(zone).strftime('%Y-%m-%d %H:%M:%S'),row['run_id'],row['candidate_name'],'电子简历图片',
-                           '未采集' if note else '待保存/未记录',
+                           NORMAL if note else BUG,
                            note or '本次没有已归档的简历图片，尚未记录具体保存结果；不代表已保存成功。'])
         for field, note, stage in (('resume_archive_status', 'resume_archive_note', '电子简历归档'),
                                    ('pdf_status', 'pdf_note', 'PDF归档')):
             if row[field] == 'missing' and row[note]:
                 ws.append([datetime.fromisoformat(row['updated_at']).astimezone(zone).strftime('%Y-%m-%d %H:%M:%S'), row['run_id'], row['candidate_name'], stage,
-                           '未保存', row[note]])
+                           classification(row[note]), '未保存；'+row[note]])
     if ws.max_row == 1:
-        ws.append(['', '', '', '电子简历保存', '暂无失败记录', ''])
+        ws.append(['', '', '', '电子简历保存',NORMAL,'暂无意外情况。'])
     ws.freeze_panes = 'A2'
     ws.auto_filter.ref = ws.dimensions
     for cell in ws[1]:
@@ -93,6 +126,8 @@ def append_sheet(wb, db, profile, at, run_id=None, report_rows=None):
         for cell in row:
             cell.alignment = Alignment(vertical='top', wrap_text=True)
             if isinstance(cell.value,str):cell.data_type='s'
+            if row[4].value==BUG:
+                cell.fill=PatternFill('solid',fgColor='FDE9E7')
     for col, width in zip('ABCDEF', (23, 22, 18, 24, 23, 95)):
         ws.column_dimensions[col].width = width
 

@@ -1,6 +1,7 @@
 """Small Windows progress and control window for a recruiting run."""
 
 from __future__ import annotations
+import workspace_paths
 
 import argparse
 import contextlib
@@ -24,6 +25,7 @@ import ledger
 import daily_metrics
 from keep_awake import KeepAwake
 from report_paths import report_path
+from report_snapshot import create as report_snapshot
 
 
 CN_TZ = timezone(timedelta(hours=8))
@@ -55,6 +57,33 @@ BUTTON_BG = "#30404F"
 BUTTON_ACTIVE_BG = "#42576A"
 BUTTON_DISABLED_BG = "#26333E"
 BUTTON_BORDER = "#3C4D5D"
+SIGNAL_COLORS = dict(green='#4ADE80',yellow='#F6C857',red='#EF6262',gray='#94A3B8')
+
+
+def indicator(data):
+    state=data['state']
+    if state=='stopped':return 'gray','已结束'
+    interrupt=data.get('interrupt_status') or ''
+    if (state in ('login_required','expired') or
+        interrupt.startswith(('failed','not_bound')) or interrupt=='unconfirmed' or
+        data.get('scheduler_state') in ('needs_attention','needs_page') or
+        data.get('warnings') or data.get('error') and not data.get('foreground_waiting')):
+        return 'red','等待人工登录' if state=='login_required' else '运行异常'
+    if data.get('foreground_required'):
+        return 'yellow','需要前台'
+    if state=='paused':return 'gray','已暂停'
+    return 'green','完成当前候选人' if state=='draining' else '运行中'
+
+
+def friendly_error(value):
+    text=str(value or '')
+    for code,message in (
+        ('candidate_card_ambiguous_or_missing','卡片定位失败（目标卡不唯一），已保留实际错误并暂停该候选人。'),
+        ('coworker_timeout_5s','同事沟通记录超过5秒，已静默跳过该判断。')):
+        if code in text:return message
+    return text
+
+
 ESTIMATE_REVIEW_BASELINE = 300
 INDICATOR_DIAMETER = 52
 TEXT_LEFT = 82
@@ -86,12 +115,18 @@ def workflow_detail(db,run_id,state,active,elapsed):
                 finish='正在整理记录与报告',next='正在切换下一位候选人',complete='正在结束本轮')
             labels.update(worker_list='正在匹配列表关键词',worker_open='正在打开电子简历',worker_read='正在匹配简历全文')
             label=labels.get(row['phase'],current_step(db,state,active))
+            if payload.get('handoff_kind')=='overall_review':label='正在AI整体复盘'
+            elif payload.get('handoff_kind')=='summary':label='正在生成AI优缺点'
             if row['phase']=='next':
                 import short_view_wait
                 wait=payload.get('short_view_wait') or {}
                 if wait.get('retry_at') and short_view_wait.enabled(db,run_id):
                     remaining=max(0,math.ceil((ledger.parse_time(wait['retry_at'])-ledger.now()).total_seconds()))
-                    if remaining:label=f'短查看随机等待：剩余 {remaining} 秒'
+                    if remaining:label=f'查看等待：剩余 {remaining} 秒'
+                elif wait.get('view_remaining_seconds',0)>0:
+                    label=f"最低查看等待：剩余 {wait['view_remaining_seconds']} 秒"
+                elif wait.get('rest_remaining_seconds',0)>0:
+                    label=f"成功招呼后休息：剩余 {wait['rest_remaining_seconds']} 秒"
             name=payload.get('candidate',{}).get('candidate_name') or '姓名未知'
             seconds=max(0,elapsed-int(payload.get('phase_started_elapsed',elapsed)))
             return f'{label} - {name} - {seconds} 秒'
@@ -180,9 +215,9 @@ def configure_overlay_windows(status_window: tk.Tk, button_window: tk.Toplevel) 
     button_hwnd = _top_level_handle(button_window)
     button_style = _get_window_style(button_hwnd)
     _set_window_style(button_hwnd, button_style | WS_EX_LAYERED | WS_EX_TOOLWINDOW)
-    flags = SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
-    ctypes.windll.user32.SetWindowPos(status_hwnd, 0, 0, 0, 0, 0, flags)
-    ctypes.windll.user32.SetWindowPos(button_hwnd, 0, 0, 0, 0, 0, flags)
+    flags = SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_FRAMECHANGED
+    ctypes.windll.user32.SetWindowPos(wintypes.HWND(status_hwnd), wintypes.HWND(-1), 0, 0, 0, 0, flags)
+    ctypes.windll.user32.SetWindowPos(wintypes.HWND(button_hwnd), wintypes.HWND(-1), 0, 0, 0, 0, flags)
 
 
 def _window_text(hwnd: int) -> str:
@@ -270,17 +305,21 @@ def snapshot(db: sqlite3.Connection, run_id: str, output_root=None) -> dict:
         FROM candidate_progress WHERE run_id=? AND finished_at IS NOT NULL""", (run_id,)).fetchone()
     average_seconds = round(average_row[0]) if average_row[0] is not None else None
     remaining_minutes,basis=daily_metrics.estimate(run,progress["started"],sent,average_seconds,elapsed)
-    daily=daily_metrics.daily_counts(db,run,output_root or Path.home()/"Desktop")
+    daily=daily_metrics.daily_counts(db,run,output_root or workspace_paths.desktop_dir())
     viewing_average_seconds=viewing_average(db,run_id,progress['started'],elapsed)
     step=workflow_detail(db,run_id,state,active,elapsed)
+    workflow_payload={}
     has_workflow=db.execute("SELECT 1 FROM sqlite_master WHERE name='workflow_state'").fetchone()
-    if state=='running' and has_workflow:
-        workflow=db.execute('SELECT phase,payload FROM workflow_state WHERE run_id=?',(run_id,)).fetchone()
-        if workflow and workflow['phase']=='send' and json.loads(workflow['payload']).get('rate_limit'):
-            import greeting_rate
-            rate=greeting_rate.status(db)
-            if rate['state']=='rate_limited':step=f"速度控制：等待{rate['retry_after_seconds']}秒后继续（10人/10分钟）"
+    workflow=db.execute('SELECT phase,payload FROM workflow_state WHERE run_id=?',(run_id,)).fetchone() if has_workflow else None
+    if workflow:workflow_payload=json.loads(workflow['payload'])
+    import foreground_activity
+    foreground_label=foreground_activity.current(db,run_id) if state in ('running','draining') else None
     return {"state": state, "elapsed": f"{elapsed // 3600:02d}:{elapsed % 3600 // 60:02d}:{elapsed % 60:02d}",
+            "foreground_required":bool(foreground_label or workflow_payload.get('foreground_required')),
+            "foreground_waiting":bool(workflow_payload.get('foreground_required')),
+            "foreground_label":foreground_label,"error":friendly_error(workflow_payload.get('error')),
+            "warnings":workflow_payload.get('warnings',[]),"scheduler_state":workflow_payload.get('scheduler_state'),
+            "notice_wait":workflow_payload.get('notice_wait'),
             "current_step": step, "drain_reason":drain_reason,
             "current": active["ordinal"] if active else None, "started": progress["started"],
             "completed": progress["completed"], "electronic": progress["electronic"],
@@ -356,7 +395,6 @@ class ProgressWindow:
         self.demo = demo
         self.wake = KeepAwake()
         self.timer: str | None = None
-        self.last_codex_check = 0.0
         self.detail_metrics_key: tuple | None = None
         self.pause_enabled = False
         logical_screen_width = max(1, root.winfo_screenwidth())
@@ -474,7 +512,6 @@ class ProgressWindow:
         configure_overlay_windows(root, self.button_window)
         root.protocol("WM_DELETE_WINDOW", self.stop)
         self.button_window.protocol("WM_DELETE_WINDOW", self.stop)
-        self.keep_codex_maximized()
         self.refresh()
 
     def _hover_button(self, index: int, hovering: bool) -> None:
@@ -482,14 +519,6 @@ class ProgressWindow:
         self.button_canvas.configure(cursor="hand2" if enabled else "")
         fill = ("#15803D" if hovering else "#166534") if enabled and index==0 else BUTTON_ACTIVE_BG if enabled and hovering else (BUTTON_BG if enabled else BUTTON_DISABLED_BG)
         self.button_canvas.itemconfigure(self.button_rects[index], fill=fill)
-
-    def keep_codex_maximized(self) -> None:
-        if self.demo:
-            return
-        if time.monotonic() - self.last_codex_check < 4:
-            return
-        self.last_codex_check = time.monotonic()
-        ensure_codex_maximized()
 
     def read(self) -> dict:
         db = ledger.connect(self.db_path)
@@ -509,34 +538,32 @@ class ProgressWindow:
         self.refresh()
 
     def refresh(self) -> None:
+        if getattr(self,'terminating',False):return
         if self.timer is not None:
             self.root.after_cancel(self.timer)
             self.timer = None
-        self.keep_codex_maximized()
         try:
             data = self.read()
-            labels = {"running": "运行中", "paused": "已暂停", "login_required": "等待人工登录", "stopped": "已结束", "expired": "已到运行期限", "draining":"完成当前候选人"}
             state = data["state"]
             if not self.demo: self.wake.set_running(state in ("running","draining"))
             if state in ("expired","stopped") or (state=="draining" and data["current"] is None):
                 self.begin_termination("run_expired" if state=="expired" else data.get("drain_reason") or "manual_stop")
                 return
-            dot_colors = {
-                "running": "#4ADE80",
-                "draining": "#F6C857",
-                "paused": "#F6C857",
-                "login_required": "#FB923C",
-                "stopped": "#94A3B8",
-                "expired": "#EF6262",
-            }
-            self.status_canvas.itemconfigure(self.state_dot, fill=dot_colors[state])
+            signal,label=indicator(data)
+            self.status_canvas.itemconfigure(self.state_dot, fill=SIGNAL_COLORS[signal])
             interrupt=data.get('interrupt_status') or ''
             step=data['current_step']
+            if data.get('notice_wait'):
+                step=f"等待调整岗位/筛选 {data['notice_wait'].get('remaining_seconds',30)} 秒 · 回复“继续”可跳过"
+            if signal=='yellow':step=data.get('foreground_label') or data.get('error') or step
+            elif signal=='red' and data.get('error'):step=data['error']
             if state=='paused' and getattr(self,'pausing',False):step='正在中断 Codex…'
             elif state=='paused' and interrupt.startswith(('failed','not_bound')):
                 step='招聘已暂停，Codex中断失败，请手动停止'
+            elif state=='paused' and interrupt=='unconfirmed':
+                step='招聘已暂停，尚未确认聊天停止，请检查Codex状态'
             self.status_canvas.itemconfigure(
-                self.state_item, text=f"{labels[state]} · {data['elapsed']} · {step}"
+                self.state_item, text=f"{label} · {data['elapsed']} · {step}"
             )
             metrics_key = (data.get("daily_judged"),data.get("daily_resume_viewed"),data.get("daily_sent"),data["remaining_minutes"],data.get("report_pending"),data.get('viewing_average_seconds'))
             if metrics_key != self.detail_metrics_key:
@@ -558,6 +585,9 @@ class ProgressWindow:
             self.button_canvas.itemconfigure(self.button_texts[2], fill="#F4F7FA")
         except (OSError, ValueError, sqlite3.Error) as exc:
             self.wake.close()
+            import error_alert
+            if getattr(self,'last_refresh_error',None)!=str(exc):error_alert.play()
+            self.last_refresh_error=str(exc)
             self.status_canvas.itemconfigure(self.state_dot, fill="#EF6262")
             self.status_canvas.itemconfigure(self.state_item, text="读取状态失败")
             self.status_canvas.itemconfigure(self.detail_item, text=str(exc)[:100])
@@ -570,10 +600,11 @@ class ProgressWindow:
             self.button_canvas.itemconfigure(self.button_texts[1], fill="#F4F7FA")
             self.button_canvas.itemconfigure(self.button_rects[2], fill=BUTTON_BG)
             self.button_canvas.itemconfigure(self.button_texts[2], fill="#F4F7FA")
+        configure_overlay_windows(self.root, self.button_window)
         self.timer = self.root.after(1000, self.refresh)
 
     def pause_or_resume(self) -> None:
-        if getattr(self,'pausing',False) or self.read()['state']!='running':return
+        if getattr(self,'terminating',False) or getattr(self,'pausing',False) or self.read()['state']!='running':return
         try:
             self.pausing=True
             self.change('pause')
@@ -585,6 +616,8 @@ class ProgressWindow:
             threading.Thread(target=worker,daemon=False).start()
         except (OSError, ValueError, sqlite3.Error) as exc:
             self.pausing=False
+            import error_alert
+            error_alert.play()
             messagebox.showerror("状态更新失败", str(exc))
 
     def begin_termination(self, reason):
@@ -594,6 +627,15 @@ class ProgressWindow:
         if self.timer is not None:
             self.root.after_cancel(self.timer)
             self.timer = None
+        self.pause_enabled=False
+        self.button_enabled=[False,False,False]
+        self.status_canvas.itemconfigure(self.state_dot,fill=SIGNAL_COLORS['gray'])
+        self.status_canvas.itemconfigure(self.state_item,text='正在关闭……')
+        self.status_canvas.itemconfigure(self.detail_item,text='正在停止任务并整理记录，请稍候。')
+        for index in range(3):
+            self.button_canvas.itemconfigure(self.button_rects[index],fill=BUTTON_DISABLED_BG)
+            self.button_canvas.itemconfigure(self.button_texts[index],fill='#7C8A97')
+        self.button_canvas.itemconfigure(self.button_texts[1],text='关闭中…')
         self.termination_result = None
         def worker():
             try:
@@ -601,10 +643,10 @@ class ProgressWindow:
                     run_safety.request_stop(db,self.run_id,reason)
                     report=stop_controller.finalize(db,self.run_id,self.output_root,
                         interrupt=not self.demo,opener=lambda _:None)
-                    if stop_controller.report_status(db,self.run_id)['report_pending']:report=None
+                    if report is None:raise ValueError('记录仍在由另一收尾任务整理，请稍后再次点击结束。')
                 self.termination_result=(report,None)
             except Exception as exc: self.termination_result=(None,str(exc))
-        threading.Thread(target=worker,daemon=False).start()
+        threading.Thread(target=worker,daemon=True).start()
         self.root.after(100,self.finish_termination)
 
     def finish_termination(self):
@@ -613,32 +655,78 @@ class ProgressWindow:
             return
         report,error=self.termination_result
         if error:
+            import error_alert
+            error_alert.play()
+            # A report failure must not trap an already stopped run's window.
+            with contextlib.closing(ledger.connect(self.db_path)) as db:
+                stopped=bool(ledger.run_row(db,self.run_id)['stop_reason'])
+                if stopped:
+                    db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
+                        ('close_report_pending/'+self.run_id,error))
+            if stopped:
+                try:
+                    messagebox.showwarning('任务已停止，记录待补',
+                        '任务已停止，窗口将关闭。记录整理尚未完成，下次启动时会重新尝试。\n'+error,
+                        parent=self.root)
+                finally:self.root.destroy()
+                return
             self.terminating=False
+            self.status_canvas.itemconfigure(self.state_dot,fill=SIGNAL_COLORS['red'])
+            self.status_canvas.itemconfigure(self.state_item,text='关闭失败，请重试结束')
+            self.status_canvas.itemconfigure(self.detail_item,text=error[:100])
+            self.button_enabled=[False,True,True]
+            for index in (1,2):
+                self.button_canvas.itemconfigure(self.button_rects[index],fill=BUTTON_BG)
+                self.button_canvas.itemconfigure(self.button_texts[index],fill='#F4F7FA')
+            self.button_canvas.itemconfigure(self.button_texts[1],text='结束')
             messagebox.showerror("结束失败",error,parent=self.root)
             return
         if not self.demo:
             with contextlib.closing(ledger.connect(self.db_path)) as db:
                 status=ledger.run_row(db,self.run_id)['interrupt_status'] or ''
             if status.startswith(('failed','not_bound')):
-                messagebox.showwarning('招聘已结束','招聘运行已结束，但未能中断 Codex，请手动点击 Codex 的停止按钮。\n'+status,parent=self.root)
-        self.root.destroy()
-        if report: os.startfile(report)
+                import error_alert
+                error_alert.play()
+                messagebox.showwarning('招聘已结束','招聘已停止并完成收尾，但中断当前聊天时出现问题，请检查 Codex 状态；详细原因已记录在运行结果。',parent=self.root)
+            # An unavailable chat/composer state is recorded as unconfirmed;
+            # it must not turn successful recruiting cleanup into an error popup.
+        self.status_canvas.itemconfigure(self.state_item,text='已关闭')
+        self.status_canvas.itemconfigure(self.detail_item,text='任务已结束，记录整理完成。')
+        try:
+            if messagebox.askyesno('招聘已结束','是否打开 Excel 招呼记录？',parent=self.root):
+                if report:
+                    try:os.startfile(report)
+                    except OSError as exc:
+                        import error_alert
+                        error_alert.play()
+                        messagebox.showerror('打开 Excel 失败',str(exc),parent=self.root)
+                else:
+                    messagebox.showinfo('Excel 待同步','任务已结束，但 Excel 报表尚未同步完成，暂时无法打开。',parent=self.root)
+        finally:self.root.destroy()
 
     def stop(self) -> None:
+        if getattr(self,'terminating',False):
+            with contextlib.closing(ledger.connect(self.db_path)) as db:
+                if ledger.run_row(db,self.run_id)['stop_reason']:
+                    db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
+                        ('close_report_pending/'+self.run_id,'window_closed_while_finalizing'))
+                    self.wake.close()
+                    self.root.destroy()
+            return
         self.begin_termination("manual_stop")
 
     def open_report(self) -> None:
+        if getattr(self,'terminating',False):return
         try:
-            state = self.read()
-            if state.get('report_pending'):
-                messagebox.showinfo('简报待补写','当前简报尚未同步完成；关闭占用的Excel后补写同一文件。',parent=self.root)
-                return
-            path = Path(state['report_path'])
+            with contextlib.closing(ledger.connect(self.db_path)) as db:
+                path=report_snapshot(db,self.run_id,self.output_root)
             if not path.is_file():
                 messagebox.showinfo("简报尚未生成", "处理完第一位候选人后，简报才会生成。", parent=self.root)
                 return
-            os.startfile(path)  # Windows opens the workbook with the registered Excel app.
+            os.startfile(path)
         except (OSError, ValueError, sqlite3.Error) as exc:
+            import error_alert
+            error_alert.play()
             messagebox.showerror("打开报告失败", str(exc), parent=self.root)
 
 
@@ -648,7 +736,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, default=ledger.DEFAULT_DB)
     parser.add_argument("--run", required=True)
-    parser.add_argument("--output-root", type=Path, default=Path.home() / "Desktop")
+    parser.add_argument("--output-root", type=Path, default=workspace_paths.desktop_dir())
     parser.add_argument("--demo", action="store_true", help="Label a temporary test run as demo data")
     args = parser.parse_args()
     with contextlib.closing(ledger.connect(args.db)) as db:

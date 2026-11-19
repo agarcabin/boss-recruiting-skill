@@ -9,21 +9,25 @@ import sys
 from pathlib import Path
 import ledger
 import candidate_checks
+import capture_control
 import powershell_host
 import run_safety
-from windows_process import hidden_options
+from windows_process import hidden_options,decode_output
 
 
 def check_candidate(db,run_id,candidate_id,generation):
     # OCR remains optional; when used it follows the highest-priority colleague check.
+    run = capture_control.require_running(db,run_id,generation)
     candidate_checks.require_resume(db,run_id,candidate_id)
-    return ledger.run_row(db,run_id)
+    return run
 
 
 def capture(db, run_id, candidate_id, hwnd, output_dir, execute=None):
+    generation = ledger.run_row(db,run_id)['generation']
     try:
         return _capture(db,run_id,candidate_id,hwnd,output_dir,execute)
     except (OSError,ValueError,subprocess.SubprocessError) as exc:
+        capture_control.raise_if_interrupted(db,run_id,generation,exc)
         import resume_diagnostics
         detail=resume_diagnostics.reason(exc)
         stage='电子简历OCR/文件校验' if 'ocr' in detail.lower() else '电子简历采集/保存'
@@ -49,9 +53,9 @@ def _capture(db, run_id, candidate_id, hwnd, output_dir, execute=None):
 
     def stage(command):
         check_candidate(db, run_id, candidate_id, generation)
-        result = execute(managed + command, check=True, capture_output=True, text=True, encoding='utf-8-sig',
+        result = execute(managed + command, check=True, capture_output=True,
                          env={**os.environ, 'PYTHONUTF8': '1', 'PYTHONIOENCODING': 'utf-8'}, **hidden_options())
-        payload = json.loads(result.stdout.strip())
+        payload = json.loads(decode_output(result.stdout).strip())
         check_candidate(db, run_id, candidate_id, generation)
         return payload
 
@@ -72,6 +76,8 @@ def _capture(db, run_id, candidate_id, hwnd, output_dir, execute=None):
     ocr_body=text.read_text(encoding='utf-8-sig')
     if any(marker in ocr_body for marker in ('该牛人近期受同行BOSS欢迎','热搜牛人','相关推荐')):
         raise ValueError('resume_capture_occluded_by_recommendations')
+    if result.get('captureMode') == 'single_page' and '牛人' not in ocr_body:
+        raise ValueError('resume_single_page_bottom_marker_missing')
     return {'state': 'ready_for_assessment', 'run_id': run_id, 'candidate_id': candidate_id,
             'generation': generation, 'resume_evidence': {'image': str(image), 'ocr_text': str(text), 'ocr_json': str(detail)}}
 
@@ -88,10 +94,13 @@ def main():
         with contextlib.closing(ledger.connect(a.db)) as db:
             result = capture(db, a.run, a.candidate_id, a.hwnd, a.output_dir)
         print(json.dumps(result, ensure_ascii=False))
+    except capture_control.CaptureInterrupted as exc:
+        print(json.dumps(dict(state='interrupted',error=str(exc),assessment_started=False),ensure_ascii=False))
+        raise SystemExit(20)
     except (ValueError, OSError, subprocess.SubprocessError) as exc:
         result = {'state': 'failed', 'error': str(exc), 'assessment_started': False, 'automatic_retry': False}
         if isinstance(exc, subprocess.CalledProcessError):
-            result['detail'] = (exc.stderr or exc.stdout or '')[-3000:]
+            result['detail'] = decode_output(exc.stderr or exc.stdout)[-3000:]
         print(json.dumps(result, ensure_ascii=False))
         raise SystemExit(1)
 

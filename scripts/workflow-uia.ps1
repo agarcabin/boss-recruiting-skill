@@ -1,11 +1,13 @@
 param(
- [ValidateSet('Select','PageJob','ResumePresence','Resume','ResumeFull','Greeting','Next','Close','CoworkerTab','RelatedClose','CardOpen')][string]$Action='Select',
+ [ValidateSet('Select','FilterState','LayoutState','PageJob','ResumePresence','Resume','ResumeFull','Greeting','Next','Close','CoworkerTab','RelatedClose','CardOpen')][string]$Action='Select',
  [long]$WindowHandle,[string]$SkipFile,[string]$CardRuntime
 )
 $OutputEncoding=[Text.UTF8Encoding]::new($false);[Console]::OutputEncoding=$OutputEncoding
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName UIAutomationClient;Add-Type -AssemblyName UIAutomationTypes
 . (Join-Path $PSScriptRoot 'boss-browser-binding.ps1')
+. (Join-Path $PSScriptRoot 'coworker-tab-selection.ps1')
+. (Join-Path $PSScriptRoot 'filter-control.ps1')
 
 if(!$WindowHandle){
  $null=Get-BossBrowserRoot
@@ -21,6 +23,46 @@ foreach($d in (Get-BossDocuments $root)){
 }
 if(!$docs.Count){throw 'boss_document_unavailable'}
 function Target($node,$url){return @{browser_binding_id=(Get-BossBindingId);hwnd=$WindowHandle;runtime_id=$node.GetRuntimeId();name=$node.Current.Name;class_name=$node.Current.ClassName;document_url=$url}}
+if($Action -in @('FilterState','LayoutState')){
+ $buttons=@();$seenButtons=[Collections.Generic.HashSet[string]]::new()
+ $fc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ClassNameProperty,'filter-label-wrap')
+ foreach($doc in $docs|Where-Object {$_.url -notlike '*c-resume*'}){
+  foreach($node in $doc.element.FindAll([System.Windows.Automation.TreeScope]::Descendants,$fc)){
+   if(!$node.Current.IsOffscreen -and $seenButtons.Add(($node.GetRuntimeId() -join ','))){$buttons+=,$node}
+  }
+ }
+ # BOSS exposes the filter label as Text on some layouts, not Button.
+ foreach($type in @([System.Windows.Automation.ControlType]::Button,[System.Windows.Automation.ControlType]::Text)){
+  if($buttons.Count){break}
+  $condition=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,$type)
+  foreach($doc in $docs|Where-Object {$_.url -notlike '*c-resume*'}){
+   foreach($node in $doc.element.FindAll([System.Windows.Automation.TreeScope]::Descendants,$condition)){
+    if(!$node.Current.IsOffscreen -and (Test-BossFilterLabel $node.Current.Name) -and $seenButtons.Add(($node.GetRuntimeId() -join ','))){$buttons+=,$node}
+   }
+  }
+ }
+ if($buttons.Count -ne 1){@{state='unknown';reason=$(if($buttons.Count){'filter_control_not_unique'}else{'filter_control_not_found'});match_count=$buttons.Count}|ConvertTo-Json -Compress;exit}
+ $button=$buttons[0];$rect=$button.Current.BoundingRectangle;$view=$root.Current.BoundingRectangle
+ if($Action -eq 'LayoutState'){
+  $headerFits=(!$button.Current.IsOffscreen -and $rect.Left -ge $view.Left -and $rect.Right -le $view.Right -and $rect.Bottom -le $view.Bottom -and $rect.Top -ge $view.Top)
+  $cardFits=$true
+  $cc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ClassNameProperty,'card-item')
+  foreach($doc in $docs|Where-Object {$_.url -notlike '*c-resume*'}){
+   foreach($card in $doc.element.FindAll([System.Windows.Automation.TreeScope]::Descendants,$cc)){
+    if($card.Current.IsOffscreen){continue}
+    $cr=$card.Current.BoundingRectangle
+    if($cr.Left -lt $view.Left-2 -or $cr.Right -gt $view.Right+2){$cardFits=$false}
+   }
+  }
+  @{state='read';fits=($headerFits -and $cardFits);header_fits=$headerFits;cards_fit_horizontally=$cardFits}|ConvertTo-Json -Compress;exit
+ }
+ $labels=@($button.Current.Name)
+ $tc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Text)
+ foreach($node in $button.FindAll([System.Windows.Automation.TreeScope]::Descendants,$tc)){if(!$node.Current.IsOffscreen){$labels+=,$node.Current.Name}}
+ $counts=@($labels|ForEach-Object {[regex]::Matches($_,'\d+')|ForEach-Object {[int]$_.Value}}|Select-Object -Unique)
+ if($counts.Count -gt 1){@{state='unknown';reason='filter_count_ambiguous'}|ConvertTo-Json -Compress;exit}
+ @{state='read';count=$(if($counts.Count){$counts[0]}else{0});has_number=($counts.Count -gt 0)}|ConvertTo-Json -Compress;exit
+}
 if($Action -eq 'RelatedClose'){
  $cc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ClassNameProperty,'boss-popup__close')
  $hits=@()
@@ -59,11 +101,12 @@ function Invoker($node){
  return $null
 }
 if($Action -eq 'CardOpen'){
- $cc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ClassNameProperty,'card-item')
  $hits=@();$seen=[Collections.Generic.HashSet[string]]::new()
  foreach($doc in $docs){
   if($doc.url -like '*c-resume*'){continue}
-  foreach($card in $doc.element.FindAll([System.Windows.Automation.TreeScope]::Descendants,$cc)){
+  foreach($card in $doc.element.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition)){
+   $classes=$card.Current.ClassName -split '\s+'
+   if(!($classes -contains 'card-item') -and !($classes -contains 'candidate-card-wrap')){continue}
    $rid=$card.GetRuntimeId() -join ','
    if($rid -ne $CardRuntime -or $card.Current.IsOffscreen -or !$seen.Add($rid)){continue}
    $open=Invoker $card
@@ -75,28 +118,65 @@ if($Action -eq 'CardOpen'){
 }
 if($Action -eq 'Select'){
  $skip=@();if($SkipFile -and (Test-Path -LiteralPath $SkipFile)){$skip=@(Get-Content -LiteralPath $SkipFile -Raw|ConvertFrom-Json)}
- $seen=[Collections.Generic.HashSet[string]]::new();$cards=@();$ordered=@()
+ $skip=@($skip|Where-Object {$_ -is [string]})
+ $seen=[Collections.Generic.HashSet[string]]::new();$cards=@();$ordered=@();$scroll=@()
  foreach($doc in $docs){
   if($doc.url -like '*c-resume*'){continue}
   $cc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ClassNameProperty,'card-item')
   foreach($card in $doc.element.FindAll([System.Windows.Automation.TreeScope]::Descendants,$cc)){
-   $rid=$card.GetRuntimeId() -join ','
-   if($card.Current.IsOffscreen -or !$seen.Add($rid)){continue}
-   $ordered+=,$rid
-   if($rid -in $skip){continue}
-   $wrapped=$card.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition)
-   $viewed=@($wrapped|Where-Object {$_.Current.ClassName -match '\b(candidate-card-wrap|card-inner)\b.*\bhas-viewed\b'}).Count -gt 0
-   if($viewed){continue}
-   $nameNode=@($wrapped|Where-Object {$_.Current.ClassName -match '(^|[- ])name($|[- ])' -and $_.Current.Name -and $_.Current.Name.Length -lt 35}|Select-Object -First 1)
-   $avatarName=@($wrapped|Where-Object {$_.Current.ClassName -eq 'avatar' -and $_.Current.Name -and $_.Current.Name.Length -lt 35 -and $_.Current.Name -notmatch '(?i)头像|图片|说明|avatar|profile'}|Select-Object -First 1)
-   $name=if($nameNode.Count){$nameNode[0].Current.Name}elseif($avatarName.Count){$avatarName[0].Current.Name}else{'姓名未暴露·卡片'+($cards.Count+1)}
-   $open=Invoker $card
-   $cards+=@{candidate_id='uia-card:'+$rid;candidate_name=$name;card_runtime=$rid;card_target=(Target $card $doc.url);open_target=$(if($open){Target $open $doc.url}else{$null});hwnd=$WindowHandle;summary=$card.Current.Name}
+   if($card.Current.IsOffscreen){continue}
+   if($card.Current.Name -match '当前职位可升级曝光效果|您的职位更新未满24小时|去升级|热搜牛人推荐|广告牛人推荐|广告.*牛人推荐|广告推荐|查看更多'){continue}
+   $ancestor=$card;$scrollPercent=-1
+   for($depth=0;$ancestor -and $depth -lt 10;$depth++){
+    $sp=$null
+    if($ancestor.TryGetCurrentPattern([System.Windows.Automation.ScrollPattern]::Pattern,[ref]$sp) -and $sp.Current.VerticallyScrollable){
+     $scrollPercent=$sp.Current.VerticalScrollPercent
+     if($scrollPercent -lt 100){$scroll+=,(Target $ancestor $doc.url)}
+     break
+    }
+    $ancestor=[System.Windows.Automation.TreeWalker]::RawViewWalker.GetParent($ancestor)
+   }
+   $units=@();$child=[System.Windows.Automation.TreeWalker]::RawViewWalker.GetFirstChild($card)
+   while($child){
+    if(($child.Current.ClassName -split '\s+') -contains 'candidate-card-wrap'){$units+=,$child}
+    $child=[System.Windows.Automation.TreeWalker]::RawViewWalker.GetNextSibling($child)
+   }
+   if(!$units.Count){$units=@($card)}
+   $viewport=$doc.element.Current.BoundingRectangle
+   foreach($unit in $units){
+    $rid=$unit.GetRuntimeId() -join ','
+    if(!$seen.Add($rid)){continue}
+    if(($unit.Current.ClassName -split '\s+') -contains 'anonymous-geek-guide-card'){continue}
+    if($unit.Current.Name -eq '广告'){continue}
+    $wrapped=$unit.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition)
+    if(@($wrapped|Where-Object {$_.Current.Name -eq '广告'}).Count){continue}
+    $ordered+=,$rid
+    if($rid -in $skip){continue}
+    $viewed=@($wrapped|Where-Object {$_.Current.ClassName -match '\b(candidate-card-wrap|card-inner)\b.*\bhas-viewed\b'}).Count -gt 0 -or $unit.Current.ClassName -match '\bhas-viewed\b'
+    if($viewed){continue}
+    $nameNode=@($wrapped|Where-Object {$_.Current.ClassName -match '(^|[- ])name($|[- ])' -and $_.Current.Name -and $_.Current.Name.Length -lt 35}|Select-Object -First 1)
+    $avatarName=@($wrapped|Where-Object {$_.Current.ClassName -eq 'avatar' -and $_.Current.Name -and $_.Current.Name.Length -lt 35 -and $_.Current.Name -notmatch '(?i)头像|图片|说明|avatar|profile'}|Select-Object -First 1)
+    $actionButton=@($wrapped|Where-Object {$_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button -and $_.Current.Name -in @('打招呼','继续沟通','继续打招呼')}|Select-Object -First 1)
+    $fallbackName=@($wrapped|Where-Object {$_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Text -and $_.Current.Name}|ForEach-Object {
+      $candidateName=($_.Current.Name -replace '\s*[.。]\s*要获取缺失的图片说明.*$','').Trim()
+      if($candidateName -and $candidateName -notmatch '^(面议|\d.*K|\d+岁|\d+年|.*活跃$|初中及以下|高中|中专/中技|大专|本科|离职-|在职-|温州|普工|组装|操作工|打招呼)$' -and $candidateName.Length -lt 30){$candidateName}
+    }|Select-Object -First 1)
+    if(!$nameNode.Count -and !$avatarName.Count -and !$actionButton.Count){continue}
+    $name=if($nameNode.Count){$nameNode[0].Current.Name}elseif($avatarName.Count){$avatarName[0].Current.Name}elseif($fallbackName.Count){$fallbackName[0]}else{'姓名未暴露·卡片'+($cards.Count+1)}
+    $open=Invoker $unit
+    $rect=$unit.Current.BoundingRectangle
+    $business='';$aid=$unit.Current.AutomationId
+    if($aid -match '^(?:geek|candidate|resume)[-_]([A-Za-z0-9_-]{12,})$'){$business=$Matches[1]}
+    $visibleWidth=[math]::Max(0,[math]::Min($rect.Right,$viewport.Right)-[math]::Max($rect.Left,$viewport.Left))
+    $visibleHeight=[math]::Max(0,[math]::Min($rect.Bottom,$viewport.Bottom)-[math]::Max($rect.Top,$viewport.Top))
+    $summary=($wrapped|Where-Object {$_.Current.Name}|ForEach-Object {$_.Current.Name}) -join "`n"
+    if(!$summary){$summary=$card.Current.Name}
+    $cards+=@{candidate_id=$(if($business){'boss-geek:'+$business}else{'uia-card:'+$rid});business_id=$business;candidate_name=$name;card_runtime=$rid;card_target=(Target $unit $doc.url);open_target=$(if($open){Target $open $doc.url}else{$null});hwnd=$WindowHandle;summary=$summary;readable_text=$summary;scroll_percent=$scrollPercent;bounds=@{x=$rect.X;y=$rect.Y;width=$rect.Width;height=$rect.Height};fully_visible=($visibleWidth -gt 0 -and $visibleHeight -gt 0)}
+   }
   }
  }
- if($cards.Count){@{state='candidate';candidate=$cards[0];ordered_runtime_ids=$ordered;resume_open=(@($docs|Where-Object {$_.url -like '*c-resume*'}).Count -gt 0)}|ConvertTo-Json -Depth 7 -Compress}
+ if($cards.Count){$cards=@($cards|Sort-Object @{Expression={[math]::Round($_.bounds.y/18)}},@{Expression={$_.bounds.x}});@{state='candidate';candidate=$cards[0];candidates=$cards;scroll_target=$(if($scroll.Count){$scroll[0]}else{$null});ordered_runtime_ids=$ordered;resume_open=(@($docs|Where-Object {$_.url -like '*c-resume*'}).Count -gt 0)}|ConvertTo-Json -Depth 7 -Compress}
  else{
-  $scroll=@()
   foreach($doc in $docs){$p=$null;if($doc.element.TryGetCurrentPattern([System.Windows.Automation.ScrollPattern]::Pattern,[ref]$p) -and $p.Current.VerticallyScrollable -and $p.Current.VerticalScrollPercent -lt 100){$scroll+=,(Target $doc.element $doc.url)}}
   @{state='no_visible_candidate';scroll_target=$(if($scroll.Count){$scroll[0]}else{$null})}|ConvertTo-Json -Depth 6 -Compress
  }
@@ -134,7 +214,7 @@ if($Action -in @('Resume','ResumeFull')){
   $tp=$null
   if($doc.element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern,[ref]$tp)){
    $full=$tp.DocumentRange.GetText(-1)
-   if($full){$resumeText=$full;$complete=$true}
+   if($full){$resumeText=(@($resumeText,$full)|Where-Object {$_}) -join "`n";$complete=$true}
   }
  }
  if($Action -eq 'ResumeFull' -and !$complete){
@@ -180,7 +260,10 @@ if($Action -in @('Resume','ResumeFull')){
  # The user-visible right-hand employment overview can be sufficient for a direct
  # employer/role match. Read that bounded panel before considering a long OCR.
  foreach($doc in $docs|Where-Object {$_.url -notlike '*c-resume*'}){
-  $hc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,'经历概览')
+  $sectionConditions=[System.Windows.Automation.Condition[]]@('经历概览','期望职位','期望岗位','求职期望','个人优势','工作经历','教育经历','项目经历','实习经历','自我评价','专业技能','资格证书'|ForEach-Object {
+   [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,$_)
+  })
+  $hc=[System.Windows.Automation.OrCondition]::new($sectionConditions)
   foreach($header in $doc.element.FindAll([System.Windows.Automation.TreeScope]::Descendants,$hc)){
    if($header.Current.IsOffscreen){continue}
    $panel=$header;$walker=[System.Windows.Automation.TreeWalker]::RawViewWalker
@@ -240,9 +323,9 @@ foreach($doc in $docs){
    if($Action -eq 'CoworkerTab'){
     $item=$node;$selected=$false;$tabTarget=$null
     for($i=0;$item -and $i -lt 3;$i++){
-     $selection=$null
-     if($item.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern,[ref]$selection)){$selected=$selection.Current.IsSelected}
-     if($item.Current.ClassName -match '(^|\s)(active|selected)(\s|$)'){$selected=$true}
+     $selection=$null;$patternSelected=$false
+     if($item.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern,[ref]$selection)){$patternSelected=$selection.Current.IsSelected}
+     $selected=Test-CoworkerTabSelection $selected $patternSelected $item.Current.ClassName
      $inv=$null;if(!$tabTarget -and $item.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern,[ref]$inv)){$tabTarget=Target $item $doc.url}
      $item=[System.Windows.Automation.TreeWalker]::RawViewWalker.GetParent($item)
     }

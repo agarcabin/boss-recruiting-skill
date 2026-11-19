@@ -6,6 +6,7 @@ $ErrorActionPreference='Stop'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 . (Join-Path $PSScriptRoot 'boss-browser-binding.ps1')
+if(!$NoImage){Request-BossForeground}
 
 Add-Type -AssemblyName System.Drawing
 Add-Type @'
@@ -22,10 +23,18 @@ $docs=(Get-BossDocuments $root)
 $document=$null;$url=$null
 foreach($doc in $docs){$pattern=$null;if($doc.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern,[ref]$pattern)){$value=$pattern.Current.Value;if($value -like 'https://www.zhipin.com/web/chat/recommend*'){$document=$doc;$url=$value;break}}}
 if(!$document){throw 'recommend_document_not_found'}
-$cardCondition=[System.Windows.Automation.AndCondition]::new(
- [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::ListItem),
- [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ClassNameProperty,'card-item'))
-$matches=@($document.FindAll([System.Windows.Automation.TreeScope]::Descendants,$cardCondition)|Where-Object {!$_.Current.IsOffscreen -and $(if($CardRuntime){($_.GetRuntimeId() -join ',') -eq $CardRuntime}else{$_.Current.Name.Contains($CandidateName)})})
+$cardElements=@($document.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition)|Where-Object {
+ $classes=$_.Current.ClassName -split '\s+'
+ ($classes -contains 'card-item' -or $classes -contains 'candidate-card-wrap')
+})
+$matches=if($CardRuntime){@($cardElements|Where-Object {($_.GetRuntimeId() -join ',') -eq $CardRuntime})}else{@($cardElements|Where-Object {$_.Current.Name.Contains($CandidateName)})}
+if($matches.Count -eq 0){
+ $nameCondition=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,$CandidateName)
+ $matches=@($cardElements|Where-Object {
+  ($_.Current.ClassName -split '\s+') -contains 'candidate-card-wrap' -and
+  $_.FindFirst([System.Windows.Automation.TreeScope]::Descendants,$nameCondition)
+ })
+}
 if($matches.Count -ne 1){throw 'candidate_card_ambiguous_or_missing'}
 $card=$matches[0];$rect=$card.Current.BoundingRectangle
 if($rect.Width -lt 20 -or $rect.Height -lt 20){throw 'card_bounds_invalid'}

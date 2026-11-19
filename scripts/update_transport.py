@@ -102,21 +102,32 @@ def release_from_page(data, repository):
     return dict(tag_name=tag, draft=False, prerelease=False, html_url=urls[0], assets=assets)
 
 
-def check(root, config, local):
+def check(root, config, local, requested_channel=None):
     import skill_update as updater
+    channel = updater.release_channel(root,config,requested_channel)
     errors = []
     only_not_found = True
     for route in routes(root, 'metadata'):
-        api = f'https://api.github.com/repos/{config["repository"]}/releases/latest'
+        api = (f'https://api.github.com/repos/{config["repository"]}/releases?per_page=100'
+               if channel == 'beta' else
+               f'https://api.github.com/repos/{config["repository"]}/releases/latest')
         try:
-            release = json.loads(updater.fetch(routed(route, api), 2*1024*1024))
-            result = updater.release_result(config, local, release)
+            payload = json.loads(updater.fetch(routed(route, api), 2*1024*1024))
+            release = updater.select_release(payload,channel)
+            if release is None:
+                remember(root, 'metadata', route)
+                return dict(state='no_release', current_version=local, repository=config['repository'], release_channel=channel, update_route=route, route_failures=errors)
+            result = updater.release_result(config, local, release, channel)
         except NETWORK_ERRORS as api_error:
             # Download-only mirrors can still follow GitHub's stable latest redirect.
+            if channel == 'beta':
+                only_not_found = only_not_found and isinstance(api_error, HTTPError) and api_error.code == 404
+                errors.append(dict(route=route, error=f'版本API：{api_error}'))
+                continue
             page = f'https://github.com/{config["repository"]}/releases/latest'
             try:
                 release = release_from_page(updater.fetch(routed(route, page), 2*1024*1024), config['repository'])
-                result = updater.release_result(config, local, release)
+                result = updater.release_result(config, local, release, channel)
             except NETWORK_ERRORS as page_error:
                 only_not_found = only_not_found and all(isinstance(e, HTTPError) and e.code == 404
                                                        for e in (api_error, page_error))
@@ -126,7 +137,7 @@ def check(root, config, local):
         result.update(update_route=route, route_failures=errors)
         return result
     if only_not_found:
-        return dict(state='no_release', current_version=local, repository=config['repository'], route_failures=errors)
+        return dict(state='no_release', current_version=local, repository=config['repository'], release_channel=channel, route_failures=errors)
     raise ValueError('all_update_routes_failed: ' + json.dumps(errors, ensure_ascii=False))
 
 

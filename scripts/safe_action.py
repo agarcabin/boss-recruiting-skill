@@ -35,7 +35,7 @@ def business_check(db, run_id, candidate_id):
     assessment = db.execute('SELECT * FROM assessments WHERE run_id=? AND candidate_hash=?', (run_id, digest)).fetchone()
     if not assessment or assessment['decision'] != 'greet' or not ledger.assessment_eligible(run, assessment):
         raise ValueError('assessment_not_eligible')
-    if assessment['evaluation_mode'] != 'card':
+    if assessment['evaluation_mode'] != 'card' or recruiting_rules.run_rules(run).get('coworker_notice_policy') == 1:
         import candidate_checks
         result = candidate_checks.evaluate_resume(db,run_id,candidate_id,json.loads(assessment['coworker_progress'] or '{}'))
         if not result['may_continue']:
@@ -45,9 +45,11 @@ def business_check(db, run_id, candidate_id):
         raise ValueError('run_target_reached')
 
 
-def dispatch(db, run_id, generation, command, token=None):
+def dispatch(db, run_id, generation, command, token=None, timeout=8):
     # No action lock, run-state/generation, active-candidate or token validity gate.
-    process = subprocess.run(command, capture_output=True, timeout=8, **hidden_options())
+    import foreground_activity
+    with foreground_activity.track(db,run_id,command):
+        process = subprocess.run(command, capture_output=True, timeout=timeout, **hidden_options())
     if process.returncode:
         raise RuntimeError(process.stderr.decode('utf-8', errors='replace')[-1600:])
     return {'state': 'dispatched', 'verified_sent': False, 'token': token,

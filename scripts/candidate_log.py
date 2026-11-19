@@ -1,6 +1,7 @@
 """Persist each candidate decision and rebuild the daily recruiting workbook."""
 
 from __future__ import annotations
+import workspace_paths
 
 import argparse
 import contextlib
@@ -44,7 +45,7 @@ DETAIL_HEADERS = ["录入时间", "项目", "岗位", "运行编号", "候选人
                   "附件简历分", "附件依据", "综合分", "硬条件", "硬条件例外授权", "判定", "发送状态", "优点", "缺点", "命中词",
                   "电子简历判断", "PDF归档", "PDF路径", "PDF说明",
                   "简历图片", "简历OCR文本", "简历OCR结果", "简历归档", "简历归档说明",
-                  "同事去重", "首条同事招呼时间", "同事去重依据"]
+                  "同事去重", "首条同事招呼时间", "同事去重依据", "标注简历", "标注说明"]
 GREEN_FILL = daily_metrics.GREEN
 GREEN_FONT = "006100"
 YELLOW_FILL = "FFEB9C"
@@ -88,6 +89,8 @@ def table(db):
         "card_image_path": "TEXT",
         "card_uia_path": "TEXT",
         "timing_source": "TEXT",
+        "resume_marked_image_path": "TEXT",
+        "resume_highlight_note": "TEXT",
     }
     for name, definition in additions.items():
         if name not in columns:
@@ -98,7 +101,7 @@ def table(db):
 
 def daily_dir(root: Path, started_at: str) -> Path:
     stamp = datetime.fromisoformat(started_at).astimezone(CN_TZ)
-    return root / "自动投递记录" / stamp.date().isoformat()
+    return workspace_paths.records_dir(root) / stamp.date().isoformat() / '运行记录'
 
 
 def recorded_time(assessed_at: str) -> str:
@@ -224,19 +227,13 @@ def workbook(db,root,started_at,filename=None,profile_path=None,run_id=None,run_
 
 def _render_workbook(db, root: Path, started_at: str, filename: str | None = None,
              profile_path: Path | str | None = None, run_id: str | None = None,
-             run_summary: list | None = None, _destination=None) -> Path:
+             run_summary: list | None = None, _destination=None, _return_workbook=False) -> Path:
     import report_store
     folder = _destination.parent
     folder.mkdir(parents=True, exist_ok=True)
     wb = Workbook()
     summary = wb.active
     summary.title = "候选人简报"
-    headers=list(SUMMARY_HEADERS)
-    if profile_path and report_store.for_profile(db,profile_path)['mode']=="card": headers[-1]="查看名片"
-    summary.append(headers)
-    details = wb.create_sheet("详细信息")
-    details.append(DETAIL_HEADERS)
-    details.sheet_state = "hidden"
     if profile_path is None:
         candidates=db.execute('SELECT DISTINCT profile_path FROM runs').fetchall()
         if len(candidates)!=1: raise ValueError('report_profile_required_for_multiple_or_no_projects')
@@ -252,6 +249,15 @@ def _render_workbook(db, root: Path, started_at: str, filename: str | None = Non
         profile_path = rows[0]["profile_path"]
     identity = report_store.for_profile(db,profile_path)['job']
     path = _destination
+    rule_row=(db.execute('SELECT rule_snapshot FROM runs WHERE run_id=?',(run_id,)).fetchone() if run_id else
+              db.execute('SELECT rule_snapshot FROM runs WHERE profile_path=? ORDER BY started_at DESC LIMIT 1',(str(profile_path),)).fetchone())
+    show_pros_cons=bool(rule_row and json.loads(rule_row['rule_snapshot'] or '{}').get('ai_pros_cons',True))
+    headers=[header for header in SUMMARY_HEADERS if show_pros_cons or header not in ('优点','缺点')]
+    if report_store.for_profile(db,profile_path)['mode']=="card": headers[-1]="查看名片"
+    summary.append(headers)
+    details = wb.create_sheet("详细信息")
+    details.append(DETAIL_HEADERS)
+    details.sheet_state = "hidden"
     for row in rows:
         if report_store.for_run(db,row['run_id'])['job'] != identity:
             continue
@@ -260,6 +266,9 @@ def _render_workbook(db, root: Path, started_at: str, filename: str | None = Non
         duration = judgment_duration_text(row["started_at"], row["ended_at"])
         duration_seconds = judgment_seconds(row["started_at"], row["ended_at"])
         coworker = json.loads(row["coworker_progress"] or "{}")
+        recorded_input=json.loads(row['evaluation_input'] or '{}')
+        coworker_label=('跳过判断（已提示）' if recorded_input.get('coworker_notice_displayed') else
+            coworker.get('action') or {'empty':'明确无记录','records':'已读取记录','unavailable':'读取不清'}.get(coworker.get('state'),'未核验'))
         coworker_skipped = (coworker.get("action") == "skip" or json.loads(row["eligibility_json"] or "{}").get("trigger")=="coworker_skip") and row["decision"] == "skip"
         coworker_unknown=json.loads(row["eligibility_json"] or "{}").get("trigger")=="coworker_unknown"
         label = "重复跳过" if coworker_skipped else "同事检查待处理" if coworker_unknown else decision_label(row["decision"])
@@ -267,11 +276,18 @@ def _render_workbook(db, root: Path, started_at: str, filename: str | None = Non
         if score_incomplete:label='未完整评分'
         overall_score = None if coworker_skipped or coworker_unknown or score_incomplete else row["overall_score"]
         hits=json.loads(row['eligibility_json'] or '{}').get('hits',[])
-        summary.append([entered_at, row["candidate_name"], overall_score, label, duration,
-                        row["pros"], row["cons"], hit_summary.grouped(hits), json.loads(row["eligibility_json"] or "{}").get("trigger","score"),
-                        message_summary(db,row), "查看名片" if row["evaluation_mode"]=="card" else "查看简历"])
-        link_cell = summary.cell(row=summary.max_row, column=len(SUMMARY_HEADERS))
+        summary_values=dict(录入时间=entered_at,候选人=row["candidate_name"],综合分=overall_score,判定=label,
+            判断时长=duration,命中词=hit_summary.grouped(hits),
+            触发方式=json.loads(row["eligibility_json"] or "{}").get("trigger","score"),
+            招呼结果=message_summary(db,row),查看简历="查看名片" if row["evaluation_mode"]=="card" else "查看简历")
+        if show_pros_cons:
+            summary_values.update(优点=row["pros"],缺点=row["cons"])
+        summary.append([summary_values[header] for header in headers])
+        link_cell = summary.cell(row=summary.max_row, column=headers.index("查看简历")+1)
         evidence_image=row["card_image_path"] if row["evaluation_mode"]=="card" else row["resume_image_path"]
+        marked = row['resume_marked_image_path'] if 'resume_marked_image_path' in row.keys() else None
+        original_image = evidence_image
+        if marked and Path(marked).is_file():evidence_image = marked
         if evidence_image and Path(evidence_image).is_file():
             try:link_cell.hyperlink=Path(os.path.relpath(Path(evidence_image).resolve(),folder.resolve())).as_posix()
             except ValueError:link_cell.hyperlink=Path(evidence_image).resolve().as_uri()
@@ -291,8 +307,9 @@ def _render_workbook(db, root: Path, started_at: str, filename: str | None = Non
                         row["pdf_status"], row["pdf_path"] or "", row["pdf_note"] or "",
                         row["resume_image_path"] or "", row["resume_ocr_text_path"] or "",
                         row["resume_ocr_json_path"] or "", row["resume_archive_status"],
-                        row["resume_archive_note"] or "", coworker.get("action", "未核验"),
-                        coworker.get("first_greeting_at") or "", coworker.get("evidence", "")])
+                        row["resume_archive_note"] or "", coworker_label,
+                        coworker.get("first_greeting_at") or "", coworker.get("evidence", ""),
+                        marked or '',row['resume_highlight_note'] or ''])
         style = (GREEN_FILL,GREEN_FONT) if daily_metrics.confirmed_sent(row) else decision_style("review") if row["decision"]=="review" else None
         if style:
             fill, font_color = style
@@ -348,6 +365,7 @@ def _render_workbook(db, root: Path, started_at: str, filename: str | None = Non
         for cells in sheet.iter_rows():
             for cell in cells:
                 if isinstance(cell.value,str):cell.data_type='s'
+    if _return_workbook:return wb
     handle, tmp = tempfile.mkstemp(prefix=".简报-", suffix=".xlsx", dir=folder)
     os.close(handle)
     try:
@@ -377,11 +395,14 @@ def record(db, args, payload=None):
     list_unchecked=bool(rules.get('list_prefilter') and payload.get('evaluation_stage')=='list' and payload['decision']!='greet')
     worker_unchecked=list_unchecked or (rules.get('mode')=='worker_resume' and payload['decision']!='greet' and not payload.get('coworker_progress'))
     if worker_unchecked: payload['coworker_progress']={'state':'not_checked','action':'not_applicable','evidence':'关键词未命中或正文不可读，未检查同事记录'}
-    if rules.get('mode')!='card' and not worker_unchecked:
+    if (rules.get('mode')!='card' or rules.get('coworker_notice_policy') == 1) and not worker_unchecked:
         observation=payload.get('coworker_progress') or candidate_checks.get(db,args.run,payload['candidate_id'])
         if rules.get('mode')=='worker_resume' and not recruiting_rules.worker_v2(rules) and (observation or {}).get('state')=='not_found':
             observation=dict(observation,state='unavailable',evidence='未找到同事面板，不能确认无记录')
-        checked=candidate_checks.record(db,args.run,payload['candidate_id'],observation or {})
+        checked=candidate_checks.record(db,args.run,payload['candidate_id'],observation or {}, 'card' if rules.get('mode') == 'card' else 'resume')
+        payload['coworker_notice_displayed']=checked.get('notice_confirmed',False)
+        if rules.get('mode') == 'card' and checked.get('notice_confirmed'):
+            payload['card'] = dict(payload.get('card', {}), coworker_contact=dict(observation, notice_confirmed=True))
         if payload['decision']=='greet' and not checked['may_continue']:
             raise ValueError('coworker_check_before_analysis: '+str(checked.get('reason',checked['action'])))
         payload['coworker_progress']=observation
@@ -471,10 +492,20 @@ def record(db, args, payload=None):
     if resume_paths[0]:
         db.execute("UPDATE assessments SET resume_image_path=?,resume_ocr_text_path=?,resume_ocr_json_path=?,resume_archive_status='saved',resume_archive_note='' WHERE run_id=? AND candidate_hash=?",
                    (*resume_paths,args.run,digest))
+        if rules.get('ocr_highlights'):
+            try:
+                import resume_highlight
+                marked=resume_highlight.create(dict(image=resume_paths[0],ocr_text=resume_paths[1],ocr_json=resume_paths[2]),result)
+                db.execute('UPDATE assessments SET resume_marked_image_path=?,resume_highlight_note=NULL WHERE run_id=? AND candidate_hash=?',(marked,args.run,digest))
+            except (OSError,ValueError,TypeError,KeyError) as exc:
+                warnings.append('简历标色待补：'+str(exc))
+                db.execute('UPDATE assessments SET resume_marked_image_path=NULL,resume_highlight_note=? WHERE run_id=? AND candidate_hash=?',(str(exc),args.run,digest))
     if rules.get("mode")=="card" or not rules.get("pdf_required",True):
         db.execute("UPDATE assessments SET pdf_status='not_applicable' WHERE run_id=? AND candidate_hash=?",(args.run,digest))
+    # Preserve the observed evidence used by the chat notice. Evaluation adds
+    # checked_at and decision fields, which would invalidate the receipt on send.
     db.execute("UPDATE assessments SET coworker_progress=? WHERE run_id=? AND candidate_hash=?",
-               (json.dumps(scores["coworker_progress"], ensure_ascii=False), args.run, digest))
+               (json.dumps(payload.get('coworker_progress') if rules.get('coworker_notice_policy') == 1 else scores["coworker_progress"], ensure_ascii=False), args.run, digest))
     path=None
     try:
         path=workbook(db,args.output_root,payload["started_at"],profile_path=run["profile_path"])
@@ -839,7 +870,7 @@ for _mutation_name in ("record","sync","archive","archive_resume","missing_resum
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, default=ledger.DEFAULT_DB)
-    parser.add_argument("--output-root", type=Path, default=Path.home() / "Desktop")
+    parser.add_argument("--output-root", type=Path, default=workspace_paths.desktop_dir())
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("record", "coworker-skip", "finalize-timing", "sync", "archive", "archive-resume", "missing-pdf", "missing-resume", "rebuild", "lookup-name"):
         command = sub.add_parser(name)

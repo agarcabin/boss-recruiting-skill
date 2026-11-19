@@ -107,6 +107,7 @@ def process_birth(pid,terminate=False,expected=None):
     handle=kernel.OpenProcess(0x1000|0x100000|(1 if terminate else 0),False,pid)
     if not handle: raise ProcessLookupError(pid)
     try:
+        if kernel.WaitForSingleObject(handle,0)==0: raise ProcessLookupError(pid)
         times=[ctypes.c_uint64() for _ in range(4)]
         if not kernel.GetProcessTimes(handle,*[ctypes.byref(x) for x in times]): raise OSError('GetProcessTimes')
         birth=times[0].value/10000000
@@ -123,6 +124,9 @@ def begin_message(db,run_id,candidate_id,index):
     run=ledger.run_row(db,run_id)
     if index not in (2,3): raise ValueError('first_message_uses_reserve')
     if recruiting_rules.run_greeting_mode(run)=='single': raise ValueError('single_greeting_disallows_followups')
+    if recruiting_rules.run_rules(run).get('coworker_notice_policy') == 1:
+        import candidate_checks
+        candidate_checks.require_resume(db,run_id,candidate_id)
     digest=ledger.run_candidate_hash(db,run_id,candidate_id)
     token=uuid.uuid4().hex; stamp=ledger.iso(ledger.now())
     db.execute('INSERT INTO message_attempts VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(run_id,candidate_hash,message_index) DO UPDATE SET token=excluded.token,status=excluded.status,updated_at=excluded.updated_at',(token,run_id,digest,index,'pending',run['generation'],stamp,stamp))

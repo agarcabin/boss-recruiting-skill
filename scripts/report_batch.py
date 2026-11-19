@@ -45,6 +45,8 @@ def _flush(session):
                     mark_written(session['db'],row['run_id'],row['candidate_hash'])
                 session['exports'].append(str(path))
             except (OSError,ValueError) as exc:
+                import error_alert
+                error_alert.play()
                 session['warnings'].append('表格待补写：'+str(exc))
     finally:_current.reset(token)
 

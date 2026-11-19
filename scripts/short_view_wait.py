@@ -25,7 +25,7 @@ def set_enabled(db,run,value):
 def coworker_exempt(rules, result, decision):
     result = result or {}
     return bool(rules.get('coworker_skip_wait_exempt') and decision == 'skip'
-                and result.get('skip') and result.get('reason') == 'coworker_within_or_exactly_7_days')
+                and result.get('skip') and str(result.get('reason','')).startswith('coworker_within_or_exactly_'))
 
 
 def plan(db,run,visit,elapsed,at=None):

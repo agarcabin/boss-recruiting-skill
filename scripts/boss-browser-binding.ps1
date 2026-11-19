@@ -1,5 +1,5 @@
 # Shared, fail-closed boundary for BOSS UIA only. No browser/desktop fallback.
-function Get-BossBrowserRoot([long]$Handle=0) {
+function Get-BossBrowserRoot([long]$Handle=0,[switch]$AllowOffscreen) {
  if(!$env:BOSS_BROWSER_BINDING -or !(Test-Path -LiteralPath $env:BOSS_BROWSER_BINDING)){throw 'codex_iab_binding_required'}
  $b=Get-Content -LiteralPath $env:BOSS_BROWSER_BINDING -Raw -Encoding UTF8|ConvertFrom-Json
  if($b.browser_target -ne 'codex_iab' -or !$b.chat_title){throw 'invalid_codex_iab_binding'}
@@ -10,10 +10,10 @@ function Get-BossBrowserRoot([long]$Handle=0) {
  if(!$hostRoot -or $hostRoot.Current.ProcessId -ne $b.process_id){throw 'codex_iab_window_changed'}
  $dc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Document)
  $docs=@($hostRoot.FindAll([System.Windows.Automation.TreeScope]::Descendants,$dc))
- $chat=@($docs|Where-Object {$v=$null; !$_.Current.IsOffscreen -and $_.Current.Name -eq $b.chat_title -and $_.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern,[ref]$v) -and $v.Current.Value -like 'app://*/index.html*'})
+ $chat=@($docs|Where-Object {$v=$null; ($AllowOffscreen -or !$_.Current.IsOffscreen) -and $_.Current.Name -eq $b.chat_title -and $_.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern,[ref]$v) -and $v.Current.Value -like 'app://*/index.html*'})
  if($chat.Count -ne 1){throw 'codex_iab_chat_changed'}
  $bound=@($docs|Where-Object {($_.GetRuntimeId() -join ',') -eq ($b.document_runtime_id -join ',')})
- if($bound.Count -ne 1 -or $bound[0].Current.IsOffscreen){throw 'codex_iab_document_lost_rebind_required'}
+ if($bound.Count -ne 1 -or (!$AllowOffscreen -and $bound[0].Current.IsOffscreen)){throw 'codex_iab_document_lost_rebind_required'}
  $value=$null
  if(!$bound[0].TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern,[ref]$value) -or $value.Current.Value -notmatch '^https://www\.zhipin\.com(?:/|$)'){throw 'codex_iab_not_boss'}
  return $bound[0]
@@ -55,4 +55,52 @@ function Assert-BossPointer {
  $p=[System.Windows.Forms.Cursor]::Position
  $element=[System.Windows.Automation.AutomationElement]::FromPoint([System.Windows.Point]::new($p.X,$p.Y))
  Assert-BossBrowserTarget $element
+}
+
+function Wait-BossForeground([int]$TimeoutMs=10000) {
+ $timer=[Diagnostics.Stopwatch]::StartNew()
+ while($true){
+  try {Assert-BossForeground;return}
+  catch {
+   if($_.Exception.Message -notmatch 'bound_codex_iab_not_foreground' -or $timer.ElapsedMilliseconds -ge $TimeoutMs){throw}
+   Start-Sleep -Milliseconds 200
+  }
+ }
+}
+
+function Request-BossForeground {
+ # Only explicit screen/mouse/keyboard operations call this function.
+ # Resolve the exact bound host/chat/document before changing window order.
+ $null=Get-BossBrowserRoot -AllowOffscreen
+ $b=Get-Content -LiteralPath $env:BOSS_BROWSER_BINDING -Raw -Encoding UTF8|ConvertFrom-Json
+ if(!('BossBrowserActivationNative' -as [type])){
+  Add-Type 'using System;using System.Runtime.InteropServices;public static class BossBrowserActivationNative{[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();[DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);[DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h,int n);[DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h,IntPtr p);[DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();[DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a,uint b,bool attach);}'
+ }
+ $handle=[IntPtr][long]$b.hwnd
+ if([BossBrowserActivationNative]::IsIconic($handle)){
+  [void][BossBrowserActivationNative]::ShowWindowAsync($handle,9)
+  Start-Sleep -Milliseconds 200
+ }
+ if([BossBrowserActivationNative]::GetForegroundWindow() -ne $handle){
+  [void][BossBrowserActivationNative]::BringWindowToTop($handle)
+  [void][BossBrowserActivationNative]::SetForegroundWindow($handle)
+ }
+ if([BossBrowserActivationNative]::GetForegroundWindow() -ne $handle){
+  # Background workers may be denied the initial activation by Windows.
+  # Temporarily join the input queues, without sending keys or mouse clicks.
+  $currentThread=[BossBrowserActivationNative]::GetCurrentThreadId()
+  $foregroundThread=[BossBrowserActivationNative]::GetWindowThreadProcessId([BossBrowserActivationNative]::GetForegroundWindow(),[IntPtr]::Zero)
+  $targetThread=[BossBrowserActivationNative]::GetWindowThreadProcessId($handle,[IntPtr]::Zero)
+  $attached=[Collections.Generic.List[uint32]]::new()
+  try {
+   foreach($thread in @($foregroundThread,$targetThread)|Select-Object -Unique){
+    if($thread -and $thread -ne $currentThread -and [BossBrowserActivationNative]::AttachThreadInput($currentThread,$thread,$true)){$attached.Add($thread)}
+   }
+   [void][BossBrowserActivationNative]::BringWindowToTop($handle)
+   [void][BossBrowserActivationNative]::SetForegroundWindow($handle)
+  } finally {
+   foreach($thread in $attached){[void][BossBrowserActivationNative]::AttachThreadInput($currentThread,$thread,$false)}
+  }
+ }
+ Wait-BossForeground -TimeoutMs 3000
 }

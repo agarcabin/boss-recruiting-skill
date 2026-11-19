@@ -1,12 +1,35 @@
 """One persistent recruiting scheduler; model handoffs are local files, not user prompts."""
 from __future__ import annotations
+import workspace_paths
 import argparse,contextlib,io,json,os,time
 from pathlib import Path
 from argparse import Namespace
 import ledger,candidate_log,candidate_checks,coworker_progress,recruiting_rules
 import fast_assessment,report_batch,run_safety
+import capture_control
 import ui_features,short_view_wait,greeting_rate
 from workflow_paths import workflow_dir
+
+
+AI_HANDOFFS={'assessment','misjudgment_review','summary','followups','overall_review'}
+WAIT_STATES={'paused','login_required','needs_page','rate_limited','short_view_wait','notice_wait'}
+
+
+def phase_activity(phase,data):
+    """Classify each persisted slice for later process/time review."""
+    scheduler=data.get('scheduler_state')
+    if scheduler in WAIT_STATES:
+        return dict(actor='wait',activity=scheduler,requires_thinking=False)
+    handoff=data.get('handoff_kind')
+    if phase=='summarize':handoff='summary'
+    elif phase=='followups':handoff='followups'
+    if handoff in AI_HANDOFFS:
+        return dict(actor='ai',activity=handoff,requires_thinking=handoff in {'assessment','misjudgment_review','summary','followups','overall_review'})
+    if handoff in ('filter_notice','coworker_notice'):
+        return dict(actor='ai',activity=handoff,requires_thinking=False)
+    if phase in ('filter_notice','coworker_notice'):
+        return dict(actor='ai',activity=phase,requires_thinking=False)
+    return dict(actor='script',activity=phase,requires_thinking=False)
 
 
 def call(fn,db,**values):
@@ -23,6 +46,12 @@ class Runner:
         candidate_log.table(db)
         db.execute('''CREATE TABLE IF NOT EXISTS workflow_state(run_id TEXT PRIMARY KEY,
             phase TEXT NOT NULL,payload TEXT NOT NULL,updated_at TEXT NOT NULL)''')
+        db.execute('''CREATE TABLE IF NOT EXISTS workflow_phase_events(
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL,candidate_hash TEXT,
+            phase TEXT NOT NULL,actor TEXT NOT NULL,activity TEXT NOT NULL,requires_thinking INTEGER NOT NULL,
+            started_at TEXT NOT NULL,started_active_seconds INTEGER NOT NULL,ended_at TEXT,
+            ended_active_seconds INTEGER,active_seconds INTEGER)''')
+        db.execute('CREATE INDEX IF NOT EXISTS workflow_phase_run ON workflow_phase_events(run_id,event_id)')
         row=db.execute('SELECT * FROM workflow_state WHERE run_id=?',(run_id,)).fetchone()
         self.phase=row['phase'] if row else 'select'
         self.data=json.loads(row['payload']) if row else dict(processed=[],visits=0)
@@ -32,13 +61,34 @@ class Runner:
 
     def save(self):
         previous_phase=self._saved[0] if self._saved else None
+        active=ledger.active_elapsed_seconds(self.db,self.run)
         if previous_phase != self.phase or 'phase_started_elapsed' not in self.data:
-            self.data['phase_started_elapsed']=ledger.active_elapsed_seconds(self.db,self.run)
+            self.data['phase_started_elapsed']=active
         payload=json.dumps(self.data,ensure_ascii=False)
+        self._record_phase_event(active)
         if self._saved==(self.phase,payload):return
         self.db.execute('INSERT INTO workflow_state VALUES (?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET phase=excluded.phase,payload=excluded.payload,updated_at=excluded.updated_at',
                         (self.run,self.phase,payload,ledger.iso(ledger.now())))
         self._saved=(self.phase,payload)
+
+    def _record_phase_event(self,active):
+        at=ledger.iso(ledger.now());activity=phase_activity(self.phase,self.data)
+        candidate_hash=self.data.get('visit_hash')
+        open_event=self.db.execute('SELECT * FROM workflow_phase_events WHERE run_id=? AND ended_at IS NULL ORDER BY event_id DESC LIMIT 1',(self.run,)).fetchone()
+        same=(open_event and open_event['phase']==self.phase and open_event['candidate_hash']==candidate_hash
+              and open_event['actor']==activity['actor'] and open_event['activity']==activity['activity']
+              and bool(open_event['requires_thinking'])==activity['requires_thinking'])
+        if same:return
+        if open_event:
+            seconds=max(0,active-open_event['started_active_seconds'])
+            self.db.execute('UPDATE workflow_phase_events SET ended_at=?,ended_active_seconds=?,active_seconds=? WHERE event_id=?',
+                            (at,active,seconds,open_event['event_id']))
+        if self.phase=='complete' or ledger.control_state(self.db,self.run)=='stopped':return
+        self.db.execute('''INSERT INTO workflow_phase_events
+            (run_id,candidate_hash,phase,actor,activity,requires_thinking,started_at,started_active_seconds)
+            VALUES (?,?,?,?,?,?,?,?)''',(self.run,candidate_hash,self.phase,activity['actor'],activity['activity'],
+                int(activity['requires_thinking']),at,active))
+
 
     def status(self,state=None):
         page_job=self.db.execute('SELECT value FROM settings WHERE key=?',('boss_page_job/'+self.run,)).fetchone()
@@ -50,11 +100,13 @@ class Runner:
                     candidate=self.data.get('candidate'),request_file=self.data.get('request_file'),
                     response_file=self.data.get('response_file'),visits=self.data.get('visits',0),
                     warnings=self.data.get('warnings',[]),error=self.data.get('error'),
-                    rate_limit=self.data.get('rate_limit'),short_view_wait=self.data.get('short_view_wait'),
+                    rate_limit=self.data.get('rate_limit'),short_view_wait=self.data.get('short_view_wait'),notice_wait=self.data.get('notice_wait'),
                     last_result=self.data.get('last_result'),exports=self.data.get('exports',[]))
 
     def handoff(self,kind,payload):
-        path=self.folder/(self.data['visit_hash']+'-'+kind+'.json')
+        # Filter notices precede the creation of a candidate visit.
+        request_key=payload['notice_id'] if kind=='filter_notice' else self.data['visit_hash']
+        path=self.folder/(request_key+'-'+kind+'.json')
         response=path.with_suffix('.response.json')
         request=dict(kind=kind,candidate=self.data['candidate'],evidence=payload)
         previous=json.loads(path.read_text(encoding='utf-8-sig')) if path.exists() else None
@@ -96,7 +148,10 @@ class Runner:
         run=ledger.run_row(self.db,self.run);mode=run['evaluation_mode']
         candidate=self.data.get('candidate',{});cid=candidate.get('candidate_id')
         phase=self.phase
+        hr_timing = 'hr_job_config' in recruiting_rules.run_rules(run)
         worker_v2=recruiting_rules.worker_v2(recruiting_rules.run_rules(run))
+        timing_policy = recruiting_rules.run_rules(run).get('view_wait_policy')
+        modern_timing = timing_policy in (2, 3)
         if phase=='select':
             reason=run_safety.quantity_reason(self.db,self.run)
             if reason:
@@ -108,7 +163,58 @@ class Runner:
             candidate=self.data.pop('prefetched',None) or self.adapter.select(self.data.get('processed',[]))
             if candidate is None:return self.status('needs_page')
             self.data.update(candidate=candidate,warnings=[],attempts=0)
+            messages=[]
+            adjustment=False
+            job=self.db.execute('SELECT value FROM settings WHERE key=?',('boss_page_job/'+self.run,)).fetchone()
+            if job and not self.data.get('page_job_notice_done'):
+                job=json.loads(job[0])
+                if job.get('name_mismatch'):
+                    messages.append(job['warning'])
+                    adjustment=True
+                    self.data['page_job_notice_done']=True
+            if recruiting_rules.run_rules(run).get('page_layout_policy') and hasattr(self.adapter,'filter_state'):
+                observed=self.adapter.filter_state()
+                signature=json.dumps(observed,ensure_ascii=False,sort_keys=True)
+                if signature != self.data.get('filter_signature'):
+                    self.data['filter_signature']=signature
+                    message=('🔴注意：还没有进行筛选。' if observed.get('state')=='read' and observed.get('count',0)==0
+                             else '无法确认筛选状态，请查看当前BOSS页面。' if observed.get('state')!='read' else None)
+                    if message:
+                        messages.append(message)
+                        adjustment=adjustment or (observed.get('state')=='read' and observed.get('count')==0)
+            if messages:
+                import hashlib,notice_wait
+                message='\n'.join(messages+([notice_wait.MESSAGE] if adjustment else []))
+                notice_id=hashlib.sha256((self.run+message+str(self.data.get('filter_signature'))).encode()).hexdigest()
+                self.data['filter_notice']=dict(message=message,notice_id=notice_id,wait_seconds=30 if adjustment else 0,
+                    instruction='在当前对话实际输出完整message后返回notice_id和displayed:true；程序从展示回执开始等待30秒，收到继续时调用ledger control --action resume跳过等待，无需确认。')
+                if adjustment:notice_wait.prepare(self.db,self.run,notice_id)
+                self.phase='filter_notice'
+                return self.handoff('filter_notice',self.data['filter_notice'])
             self.phase='open';return None
+        if phase=='filter_notice':
+            pending=self.handoff('filter_notice',self.data['filter_notice'])
+            answer=self.response()
+            if not answer:return pending
+            if answer.get('notice_id')!=self.data['filter_notice']['notice_id'] or answer.get('displayed') is not True:
+                raise ValueError('filter_notice_not_displayed')
+            notice=self.data['filter_notice']
+            for key in ('request_file','response_file','handoff_kind','filter_notice'):self.data.pop(key,None)
+            if notice.get('wait_seconds'):
+                self.data['notice_wait']=dict(notice_id=notice['notice_id'])
+                self.phase='notice_wait'
+                return None
+            self.phase='open';return None
+        if phase=='notice_wait':
+            import notice_wait
+            seconds=notice_wait.remaining(self.db,self.run,self.data['notice_wait']['notice_id'])
+            self.data['notice_wait']['remaining_seconds']=seconds
+            if seconds:return self.status('notice_wait')
+            self.data.pop('notice_wait',None)
+            self.data.pop('candidate',None)
+            self.data.pop('prefetched',None)
+            self.adapter.page_job_recorded=False
+            self.phase='select';return None
         if phase=='open':
             list_filter=bool(recruiting_rules.run_rules(run).get('list_prefilter'))
             if mode!='worker_resume' and not list_filter:self.adapter.open(candidate,mode)
@@ -120,6 +226,7 @@ class Runner:
             self.data['excluded_wait_seconds']=0
             if mode=='resume' and not list_filter or worker_v2 and candidate.get('already_open'):
                 call(ledger.electronic_opened,self.db,run=self.run,candidate_id=cid)
+                if hr_timing or modern_timing:self.data['resume_started_active']=short_view_wait.active_clock(self.db,self.run)
             if list_filter:
                 if candidate.get('already_open'):raise ValueError('list_prefilter_requires_visible_card')
                 self.phase='list_prefilter'
@@ -146,7 +253,7 @@ class Runner:
             if not matched['eligible']:
                 self.record_payload(dict(facts,decision='skip' if matched['readable'] else 'review',overall_score=0,
                     electronic_resume_enabled=False,hard_requirements=False,
-                    pros='列表未命中岗位词库，未打开简历' if matched['readable'] else '列表卡片不可读，未作岗位评估',
+                    pros=('列表命中跳过词：'+'、'.join(h['word'] for h in matched['negative_hits'])) if matched.get('negative_hits') else ('列表未命中岗位词库，未打开简历' if matched['readable'] else '列表卡片不可读，未作岗位评估'),
                     cons='未读取电子简历，优缺点未评估'))
                 self.phase='finish';return None
             self.phase='list_open';return None
@@ -159,6 +266,14 @@ class Runner:
                     pros='电子简历未成功打开，未作岗位评估',cons=str(exc)))
                 self.phase='finish';return None
             call(ledger.electronic_opened,self.db,run=self.run,candidate_id=cid)
+            if hr_timing or modern_timing:self.data['resume_started_active']=short_view_wait.active_clock(self.db,self.run)
+            if recruiting_rules.run_rules(run).get('current_rules') and hasattr(self.adapter,'platform_contact_state'):
+                contact=self.adapter.platform_contact_state(candidate,mode)
+                if isinstance(contact,dict) and contact.get('already_contacted') is True:
+                    self.record_payload(dict(self.data['facts'],decision='skip',overall_score=0,
+                        electronic_resume_enabled=False,hard_requirements=False,
+                        pros='未生成AI优缺点',cons='平台按钮为继续沟通，已招呼，跳过'))
+                    self.phase='finish';return None
             if worker_v2:
                 candidate_checks.mark_resume_opened(self.db,self.run,cid)
                 self.data['resume_started_active']=short_view_wait.active_clock(self.db,self.run)
@@ -172,6 +287,7 @@ class Runner:
         if phase=='worker_open':
             self.adapter.open(candidate,'worker_resume')
             call(ledger.electronic_opened,self.db,run=self.run,candidate_id=cid)
+            if hr_timing or modern_timing:self.data['resume_started_active']=short_view_wait.active_clock(self.db,self.run)
             if worker_v2:
                 candidate_checks.mark_resume_opened(self.db,self.run,cid)
                 self.data['resume_started_active']=short_view_wait.active_clock(self.db,self.run)
@@ -192,11 +308,13 @@ class Runner:
             browse['misses']=0;self.phase='coworker';return None
         if phase=='coworker':
             observation=self.data.get('coworker')
+            if coworker_progress.disabled(recruiting_rules.run_rules(run)):
+                observation=dict(state='disabled',evidence='同事配置为0天，未判断同事沟通')
             if observation is None:
                 observation=self.adapter.colleague(candidate,mode)
                 if worker_v2:candidate_checks.record_resume_attempt(self.db,self.run,cid,observation)
             self.data['coworker']=observation
-            if mode=='card' and observation.get('state')=='unknown':
+            if mode=='card' and observation.get('state')=='unknown' and not recruiting_rules.run_rules(run).get('coworker_notice_policy'):
                 answer=self.response()
                 if answer:
                     observation=self.adapter.complete_visual(candidate,answer)
@@ -206,6 +324,18 @@ class Runner:
             result=candidate_checks.record(self.db,self.run,cid,observation,'card' if mode=='card' else 'resume')
             self.data['coworker']=observation
             self.data['coworker_result']=result
+            if result.get('notice_required') and not result.get('notice_confirmed'):
+                notice = dict(notice_id=candidate_checks.notice_id(self.db,self.run,cid,observation),
+                    message='同事沟通记录判断超过5秒，已跳过该判断' if observation.get('evidence')=='coworker_timeout_5s' else '跳过了同事沟通记录判断', candidate=candidate,
+                    reason=observation.get('evidence') if observation.get('evidence')=='coworker_timeout_5s' else result.get('unreadable_reason', observation.get('evidence')),
+                    instruction='先在当前对话逐人输出message、候选人及简短原因，再返回notice_id和displayed:true；不需要用户再次许可。')
+                pending = self.handoff('coworker_notice', notice)
+                answer = self.response()
+                if not answer:return pending
+                candidate_checks.acknowledge_notice(self.db,self.run,cid,observation,answer)
+                result = candidate_checks.record(self.db,self.run,cid,observation,'card' if mode=='card' else 'resume')
+                self.data['coworker_result'] = result
+                for key in ('request_file','response_file','handoff_kind'):self.data.pop(key,None)
             if not result['may_continue']:
                 evidence=self.adapter.skip_evidence(candidate,mode) if hasattr(self.adapter,'skip_evidence') else {}
                 payload=dict(decision='skip' if result.get('skip') else 'review',overall_score=0,
@@ -222,9 +352,14 @@ class Runner:
             facts=dict(self.data['facts'])
             rules=recruiting_rules.run_rules(run)
             if (recruiting_rules.is_domain(rules) or rules.get('list_prefilter')) and facts.get('read_complete') is not True:
-                self.record_payload(dict(facts,decision='review',overall_score=0,electronic_resume_enabled=False,hard_requirements=False,pros='正文未完整读取，尚未完成评分',cons='保留实际材料，未发送'))
+                detail=facts.get('resume_save_error') or facts.get('read_warning') or facts.get('uia_read_warning') or '采集结果未确认完整，需重新读取'
+                if 'resume_scroll_target_missing_after_layer_fallbacks' in str(detail):detail='未找到简历正文的可滚动区域，无法完成全文采集'
+                self.record_payload(dict(facts,decision='review',overall_score=0,electronic_resume_enabled=False,hard_requirements=False,pros='正文未完整读取，尚未完成评分',cons='保留实际材料，未发送；原因：'+str(detail)))
                 self.phase='finish';return None
-            if self.data.get('handoff_kind')=='assessment':
+            if hr_timing:
+                result=recruiting_rules.evaluate(rules,facts,run['min_score'])
+                payload=fast_assessment.fill(facts,result)
+            elif self.data.get('handoff_kind')=='assessment':
                 answer=self.response()
                 if not answer:return self.status('needs_assessment')
                 payload=dict(facts,**answer)
@@ -245,10 +380,46 @@ class Runner:
                     answer=self.response()
                     if answer:payload=dict(facts,**answer)
                     else:return self.handoff('assessment',facts)
-            if rules.get('ai_pros_cons') and self.data.get('handoff_kind')!='assessment':
+            import overall_review
+            overall = overall_review.request(rules, facts)
+            if overall:
+                pending = self.handoff('overall_review', overall)
+                answer = self.response()
+                if not answer:return pending
+                answer = overall_review.validate(answer, overall)
+                facts = dict(facts, overall_review=answer)
+                self.data['facts'] = facts
+                result = recruiting_rules.evaluate(rules, facts, run['min_score'])
+                payload = dict(fast_assessment.fill(facts,result),pros=answer['pros'],cons=answer['cons'])
+                self.db.execute('INSERT INTO run_audit(run_id,at,event,detail) VALUES (?,?,?,?)',
+                    (self.run,ledger.iso(ledger.now()),'overall_review',json.dumps(dict(request_id=overall['request_id'],candidate_hash=self.data['visit_hash'],answer=answer),ensure_ascii=False)))
+                for key in ('request_file','response_file','handoff_kind'):self.data.pop(key,None)
+            import misjudgment_review
+            review = None if rules.get('current_rules') else misjudgment_review.request(rules, facts, run['min_score'])
+            if review and self.data.get('review_completed') != review['request_id']:
+                pending = self.handoff('misjudgment_review', review)
+                answer = self.response()
+                if not answer:
+                    return pending
+                items = misjudgment_review.validate(answer, review)
+                words = [i['word'] for i in items if i['verdict'] == 'unnecessary']
+                if words:
+                    try:
+                        misjudgment_review.annotate(run['profile_path'], words, run['profile_hash'])
+                    except (OSError, ValueError) as exc:
+                        self.data.setdefault('warnings', []).append('误判复诊建议未写入岗位文档：' + str(exc))
+                self.db.execute('INSERT INTO run_audit(run_id,at,event,detail) VALUES (?,?,?,?)',
+                    (self.run, ledger.iso(ledger.now()), 'misjudgment_review', json.dumps(dict(request_id=review['request_id'], candidate_hash=self.data['visit_hash'], reviews=items), ensure_ascii=False)))
+                self.data['review_completed'] = review['request_id']
+                for key in ('request_file','response_file','handoff_kind'):
+                    self.data.pop(key, None)
+            summarize = not rules.get('current_rules') or (result['eligible'] and not overall)
+            if rules.get('ai_pros_cons') and summarize and self.data.get('handoff_kind')!='assessment':
                 self.data['assessed_payload']=payload
                 self.phase='summarize'
                 return self.handoff('summary',dict(facts=facts,scoring=payload,instruction='根据已读资料分别总结优点、缺点；不复述命中词，不编造，缺失信息注明待核实。只返回pros和cons。'))
+            if rules.get('current_rules') and not overall and not result['eligible']:
+                payload.update(pros='未生成AI优缺点',cons=result['summary'])
             self.record_payload(payload)
             self.data.pop('request_file',None);self.data.pop('response_file',None)
             self.data.pop('handoff_kind',None)
@@ -320,11 +491,13 @@ class Runner:
             self.phase='next';return None
         if phase=='next':
             report_batch.flush_now(self.db)
-            processed=self.data.get('processed',[])+([candidate['card_runtime']] if candidate.get('card_runtime') else [])
+            import card_layout
+            receipt = card_layout.receipt(candidate) if recruiting_rules.run_rules(run).get('page_layout_policy') else candidate.get('card_runtime')
+            processed=self.data.get('processed',[])+([receipt] if candidate.get('card_runtime') else [])
             count=self.data.get('visits',0)+1
             reason=run_safety.quantity_reason(self.db,self.run)
             completed=dict(candidate=candidate,sent=self.data.get('sent',False),favorite=self.data.get('favorite'),warnings=self.data.get('warnings',[]))
-            if reason:
+            if reason and ((modern_timing and timing_policy != 3) or not hr_timing):
                 self.data=dict(processed=processed,visits=count,last_result=completed)
                 self.phase='complete';self.data['completion_reason']=reason
                 return self.status('complete')
@@ -333,17 +506,29 @@ class Runner:
                 sent=self.db.execute('SELECT status FROM candidates WHERE candidate_hash=?',(self.data['visit_hash'],)).fetchone()
                 browse['misses']=0 if sent and sent['status']=='sent' else browse['misses']+1
                 self.data['worker_streak_counted']=True
-            clock_key='resume_started_active' if worker_v2 else 'visit_started_active'
-            elapsed=max(0,short_view_wait.active_clock(self.db,self.run)-self.data.get(clock_key,0)-self.data.get('excluded_wait_seconds',0))
-            list_only=bool(recruiting_rules.run_rules(run).get('list_prefilter') and self.data.get('facts',{}).get('evaluation_stage')=='list' and self.phase=='next' and self.data.get('decision') in ('skip','review') and not self.data.get('coworker'))
-            wait=(dict(state='ready',retry_after_seconds=0,seconds=0) if short_view_wait.coworker_exempt(recruiting_rules.run_rules(run), self.data.get('coworker_result'), self.data.get('decision')) or list_only or (worker_v2 and self.data.get(clock_key) is None)
-                  else short_view_wait.plan(self.db,self.run,self.data['visit_hash'],elapsed))
+            if timing_policy == 3:
+                import greeting_view_wait
+                wait=greeting_view_wait.runner_wait(self,run,recruiting_rules.run_rules(run))
+            elif modern_timing:
+                import minimum_view_wait
+                wait=minimum_view_wait.runner_wait(self,run,recruiting_rules.run_rules(run))
+            elif hr_timing:
+                import hr_view_wait
+                wait=hr_view_wait.runner_wait(self,run)
+            else:
+                clock_key='resume_started_active' if worker_v2 else 'visit_started_active'
+                elapsed=max(0,short_view_wait.active_clock(self.db,self.run)-self.data.get(clock_key,0)-self.data.get('excluded_wait_seconds',0))
+                list_only=bool(recruiting_rules.run_rules(run).get('list_prefilter') and self.data.get('facts',{}).get('evaluation_stage')=='list' and self.phase=='next' and self.data.get('decision') in ('skip','review') and not self.data.get('coworker'))
+                wait=(dict(state='ready',retry_after_seconds=0,seconds=0) if short_view_wait.coworker_exempt(recruiting_rules.run_rules(run), self.data.get('coworker_result'), self.data.get('decision')) or list_only or (worker_v2 and self.data.get(clock_key) is None)
+                      else short_view_wait.plan(self.db,self.run,self.data['visit_hash'],elapsed))
             self.data['short_view_wait']=wait
-            quota=greeting_rate.status(self.db)
-            # Await both deadlines before selecting the next candidate.
-            if wait['retry_after_seconds'] or quota['retry_after_seconds']:
-                self.data['rate_limit']=quota
-                return self.status('short_view_wait' if wait['retry_after_seconds'] else 'rate_limited')
+            if reason and hr_timing:
+                if wait['retry_after_seconds']:return self.status('short_view_wait')
+                self.data=dict(processed=processed,visits=count,last_result=completed)
+                self.phase='complete';self.data['completion_reason']=reason
+                return self.status('complete')
+            if wait['retry_after_seconds']:
+                return self.status('short_view_wait')
             browse=self.data.get('worker_browse',dict(misses=0,seen=[]))
             if recruiting_rules.run_rules(run).get('list_prefilter'):
                 self.adapter.close();navigation=dict(returned_to_list=True)
@@ -356,7 +541,7 @@ class Runner:
                 if key in browse['seen']:
                     self.adapter.close();navigation=None;browse=dict(misses=0,seen=[])
                 else:browse['seen'].append(key)
-            self.data=dict(processed=processed,visits=count,last_result=completed,worker_browse=browse)
+            self.data=dict(processed=processed,visits=count,last_result=completed,worker_browse=browse,filter_signature=self.data.get('filter_signature'),page_job_notice_done=self.data.get('page_job_notice_done'))
             if navigation and navigation.get('next_candidate'):
                 self.data['prefetched']=dict(navigation['next_candidate'],already_open=True)
             self.phase='select';return None
@@ -368,9 +553,31 @@ class Runner:
             while True:
                 before=self.phase
                 try:
-                    result=self.step();self.data.pop('error',None)
+                    result=self.step()
+                    if ledger.control_state(self.db,self.run)=='running':
+                        self.data.pop('error',None)
+                        self.data.pop('foreground_required',None)
+                except capture_control.CaptureInterrupted as exc:
+                    self.data['error']=str(exc)
+                    self.data['foreground_required']=exc.foreground_required
+                    candidate=self.data.get('candidate',{})
+                    if candidate.get('candidate_id'):
+                        import resume_diagnostics
+                        resume_diagnostics.record(self.db,self.run,candidate['candidate_id'],'电子简历采集中断',exc,event='resume_interrupted')
+                    if ledger.control_state(self.db,self.run)=='running':
+                        call(ledger.control,self.db,run=self.run,action='pause')
+                    result=self.status(ledger.control_state(self.db,self.run))
                 except (OSError,RuntimeError,ValueError) as exc:
-                    self.data['error']=str(exc);result=self.status('needs_attention')
+                    import page_layout
+                    self.data['error']=str(exc)
+                    import resume_diagnostics
+                    candidate=self.data.get('candidate',{})
+                    resume_diagnostics.record(self.db,self.run,candidate.get('candidate_id') or 'run:'+self.run,'流程执行',exc,event='workflow_error')
+                    if isinstance(exc,page_layout.LayoutBlocked):
+                        call(ledger.control,self.db,run=self.run,action='pause')
+                        result=self.status('paused')
+                    else:
+                        result=self.status('needs_attention')
                 if self.phase!=before:self.data.pop('scheduler_state',None)
                 self.save()
                 if result or self.phase=='select':break
@@ -387,7 +594,7 @@ class Runner:
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--db',type=Path,default=ledger.DEFAULT_DB);p.add_argument('--run',required=True)
-    p.add_argument('--output-root',type=Path,default=Path.home()/'Desktop');p.add_argument('--hwnd',type=int)
+    p.add_argument('--output-root',type=Path,default=workspace_paths.desktop_dir());p.add_argument('--hwnd',type=int)
     p.add_argument('--status',action='store_true');p.add_argument('--worker',action='store_true');p.add_argument('--launch',action='store_true')
     p.add_argument('--browser-binding',type=Path,help='Required current-chat Codex IAB binding')
     p.add_argument('--no-ocr',action='store_true',help='Disable optional fallback OCR')
@@ -418,6 +625,7 @@ def main():
                 if alive:raise ValueError('runner_already_running')
             db.execute('INSERT OR REPLACE INTO workflow_owner VALUES (?,?,?)',(args.run,os.getpid(),run_safety.process_birth(os.getpid())))
         try:
+            page_retries=0
             while True:
                 result=runner.advance()
                 if result['state']=='complete':
@@ -426,9 +634,19 @@ def main():
                     stop_controller.finalize(db,args.run,args.output_root,interrupt=False)
                     result.update(stop_controller.report_status(db,args.run))
                 if not args.worker:print(json.dumps(result,ensure_ascii=False));break
-                if result['state'] in ('complete','stopped','needs_attention','needs_page'):break
+                if result['state'] in ('complete','stopped','needs_attention'):break
+                if result['state']=='needs_page':
+                    page_retries+=1
+                    if page_retries>3:break
+                    time.sleep(1);continue
+                page_retries=0
                 time.sleep(1 if result['state']=='rate_limited' else .5 if result['state']!='candidate_complete' else 0)
         finally:db.execute('DELETE FROM workflow_owner WHERE run_id=? AND pid=?',(args.run,os.getpid()))
 
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    try:main()
+    except Exception:
+        import error_alert
+        error_alert.play()
+        raise
