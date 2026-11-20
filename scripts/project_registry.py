@@ -391,6 +391,11 @@ def import_project(archive_path: Path, root: Path = PROJECTS_ROOT, overwrite: bo
 
 
 def main() -> None:
+    try:
+        import mcp_config
+        mcp_config.ensure()
+    except Exception:
+        pass
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=workspace_paths.configs_dir())
     parser.add_argument("--db", type=Path, help="Read-only ledger path for the home menu")

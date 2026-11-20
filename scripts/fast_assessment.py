@@ -40,4 +40,8 @@ def fill(payload,result):
         note='；扣'+str(result['preference_penalty'])+'分：'+'、'.join(result['preference_penalty_reasons'])
         if note not in result_payload['cons']:result_payload['cons']+=note
     result_payload.setdefault('electronic',dict(score=result['score'],evidence=result['summary']))
+    if result.get('trigger') == 'location_unknown':
+        result_payload['decision'] = 'review'
+    if result.get('location_decision'):
+        result_payload['location_decision'] = result['location_decision']
     return result_payload

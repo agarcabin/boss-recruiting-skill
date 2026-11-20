@@ -8,6 +8,9 @@ def seconds(value):
 
 
 def update(text):
+    if hr_job.PASS_REVIEW in text:
+        hr_job.parse(text)
+        return text
     before = hr_job.parse(text)
     # The advisory-only switch has been replaced by the overall review setting.
     text = re.sub(r'^### +3\.\s*误判复诊\s*\n[\s\S]*?(?=^## +三、其他配置)', '', text, flags=re.M)

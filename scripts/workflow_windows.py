@@ -43,6 +43,10 @@ class WindowsAdapter:
         return json.loads(done.stdout)
 
     def query(self,action,candidate=None,processed=None):
+        if not getattr(self, 'recommendation_ready', False):
+            ready = self.ps('ensure-recommendation.ps1')
+            if ready.get('state') != 'ready':raise RuntimeError('recommendation_page_not_ready')
+            self.recommendation_ready = True
         args=['-Action',action]
         if self.hwnd:args+=['-WindowHandle',str(self.hwnd)]
         if candidate:args+=['-CardRuntime',candidate['card_runtime']]
@@ -270,6 +274,14 @@ class WindowsAdapter:
                 result['resume_save_error']=resume_diagnostics.reason(exc)
                 result.pop('resume_save_note',None)
         result['readable']=bool(result.get('keyword_text','').strip())
+        if rules.get('review_policy_version', 0) >= 151 and rules['hr_job_config'].get('preferred_locations') and rules['hr_job_config'].get('preferred_location_filter_enabled', True) is not False:
+            try:
+                observation = self.query('PreferredLocation')
+            except (RuntimeError, subprocess.TimeoutExpired) as exc:
+                observation = dict(state='unknown', reason=str(exc))
+            evidence_path = self.folder/('preferred-location-'+uuid.uuid4().hex+'.json')
+            evidence_path.write_text(json.dumps(observation, ensure_ascii=False), encoding='utf-8')
+            result['preferred_location_observation'] = dict(observation, evidence_file=str(evidence_path), evidence_sha256=hashlib.sha256(evidence_path.read_bytes()).hexdigest())
         # Full raw evidence remains local; requests contain facts once per visit.
         return result
 

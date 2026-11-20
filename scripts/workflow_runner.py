@@ -253,7 +253,7 @@ class Runner:
             if not matched['eligible']:
                 self.record_payload(dict(facts,decision='skip' if matched['readable'] else 'review',overall_score=0,
                     electronic_resume_enabled=False,hard_requirements=False,
-                    pros=('列表命中跳过词：'+'、'.join(h['word'] for h in matched['negative_hits'])) if matched.get('negative_hits') else ('列表未命中岗位词库，未打开简历' if matched['readable'] else '列表卡片不可读，未作岗位评估'),
+                    pros=('列表命中否决词，未打开简历：'+'、'.join(h['word'] for h in matched['negative_hits'])) if matched.get('vetoed') else ('列表命中跳过词：'+'、'.join(h['word'] for h in matched['negative_hits'])) if matched.get('negative_hits') else ('列表未命中岗位词库，未打开简历' if matched['readable'] else '列表卡片不可读，未作岗位评估'),
                     cons='未读取电子简历，优缺点未评估'))
                 self.phase='finish';return None
             self.phase='list_open';return None

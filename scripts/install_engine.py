@@ -23,6 +23,15 @@ def target(root,name):
 
 def restore(root,backup,record):
     import hashlib
+    # Keep the joint-recovery implementation installed until all external MDs
+    # are restored. A crash must not downgrade the only code that knows them.
+    for item in record.get('config_files', []):
+        path = config_target(item['path'])
+        data = (backup/item['backup']).read_bytes()
+        if hashlib.sha256(data).hexdigest() != item['sha256']:raise ValueError('config_restore_backup_hash_mismatch')
+        if path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() not in (item['sha256'], item['after_sha256']):
+            raise ValueError('config_changed_after_installation_requires_manual_recovery')
+        atomic(path, data)
     for name,info in record['files'].items():
         path=target(root,name)
         if info['existed']:
@@ -43,7 +52,19 @@ def restore(root,backup,record):
         if not runtime.resolve().is_relative_to(root) or runtime.resolve()==root:raise ValueError('unsafe_runtime_restore')
         if runtime.exists():shutil.rmtree(filesystem_path(runtime))
 
-def install(root,files,backups,database=None,runtime_source=None):
+def config_target(value):
+    import workspace_paths
+    path = Path(value).resolve()
+    config_root = workspace_paths.configs_dir().resolve()
+    if not path.is_relative_to(config_root) or path.suffix.casefold() != '.md':raise ValueError('external_config_path_not_allowed')
+    raw = Path(value)
+    for parent in (raw, *raw.parents):
+        if parent == config_root.parent:break
+        if parent.is_symlink() or getattr(parent, 'is_junction', lambda:False)():raise ValueError('external_config_link_forbidden')
+    return path
+
+
+def install(root,files,backups,database=None,runtime_source=None,config_changes=None):
     import skill_update,hashlib
     root=Path(root).resolve();root.mkdir(parents=True,exist_ok=True)
     database=Path(database) if database else project_vault.state_dir()/'ledger.sqlite3'
@@ -54,7 +75,7 @@ def install(root,files,backups,database=None,runtime_source=None):
     with tempfile.TemporaryDirectory(prefix='.verified-release-',dir=root.parent) as stage_dir:
         stage=Path(stage_dir)
         for name,data in files.items():atomic(stage/name,data)
-        record=dict(root=str(root),database=str(database.resolve()),files={},new_runtime=False,state='prepared')
+        record=dict(root=str(root),database=str(database.resolve()),files={},config_files=[],new_runtime=False,state='prepared')
         atomic(backup/'installation.json',canonical(record))
         activated_build=json.loads(files[skill_update.MANIFEST])['version']
         with run_admission.maintenance(database,backup/'admission.json',build_id=activated_build) as ticket:
@@ -74,6 +95,17 @@ def install(root,files,backups,database=None,runtime_source=None):
                 # Freeze original identities before any project file changes.
                 with contextlib.closing(sqlite3.connect(database,isolation_level=None)) as db:
                     db.row_factory=sqlite3.Row;report_store.backfill(db)
+                config_changes = config_changes or []
+                seen_configs = set()
+                for index, change in enumerate(config_changes):
+                    path = config_target(change['path'])
+                    if str(path).casefold() in seen_configs:raise ValueError('duplicate_config_change')
+                    seen_configs.add(str(path).casefold())
+                    before = path.read_bytes()
+                    if hashlib.sha256(before).hexdigest() != change['before_sha256']:raise ValueError('config_changed_before_installation')
+                    name = 'desktop-config/'+str(index)+'.md'
+                    atomic(backup/name, before)
+                    record['config_files'].append(dict(path=str(path),backup=name,sha256=change['before_sha256'],after_sha256=hashlib.sha256(change['data']).hexdigest()))
                 for name in combined:
                     path=target(root,name);existed=path.is_file()
                     info=dict(existed=existed,sha256=None)
@@ -85,6 +117,12 @@ def install(root,files,backups,database=None,runtime_source=None):
                 activation_started=True
                 for name in sorted(set(combined)-{'SKILL.md'})+['SKILL.md']:
                     if name in combined:atomic(target(root,name),combined[name])
+                for change in config_changes:
+                    path = config_target(change['path'])
+                    if hashlib.sha256(path.read_bytes()).hexdigest() != change['before_sha256']:raise ValueError('config_changed_during_installation')
+                    atomic(path, change['data'])
+                for change in config_changes:
+                    if config_target(change['path']).read_bytes() != change['data']:raise ValueError('config_activation_verification_failed')
                 if runtime_source and not (root/'runtime/win-x64/python/python.exe').is_file():
                     source=Path(runtime_source).resolve()
                     if not (source/'python.exe').is_file():raise ValueError('runtime_source_missing')

@@ -1,5 +1,5 @@
 param(
- [ValidateSet('Select','FilterState','LayoutState','PageJob','ResumePresence','Resume','ResumeFull','Greeting','Next','Close','CoworkerTab','RelatedClose','CardOpen')][string]$Action='Select',
+ [ValidateSet('Select','FilterState','LayoutState','PageJob','ResumePresence','Resume','ResumeFull','PreferredLocation','Greeting','Next','Close','CoworkerTab','RelatedClose','CardOpen')][string]$Action='Select',
  [long]$WindowHandle,[string]$SkipFile,[string]$CardRuntime
 )
 $OutputEncoding=[Text.UTF8Encoding]::new($false);[Console]::OutputEncoding=$OutputEncoding
@@ -23,6 +23,69 @@ foreach($d in (Get-BossDocuments $root)){
 }
 if(!$docs.Count){throw 'boss_document_unavailable'}
 function Target($node,$url){return @{browser_binding_id=(Get-BossBindingId);hwnd=$WindowHandle;runtime_id=$node.GetRuntimeId();name=$node.Current.Name;class_name=$node.Current.ClassName;document_url=$url}}
+if($Action -eq 'PreferredLocation'){
+ $headerCondition=[System.Windows.Automation.OrCondition]::new([System.Windows.Automation.Condition[]]@(
+  [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,'牛人分析器'),
+  [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,'BOSS牛人分析器')
+ ))
+ $headers=@();$headerIds=[Collections.Generic.HashSet[string]]::new()
+ foreach($doc in $docs|Where-Object {$_.url -notlike '*c-resume*'}){
+  foreach($node in $doc.element.FindAll([System.Windows.Automation.TreeScope]::Descendants,$headerCondition)){
+   if(!$node.Current.IsOffscreen -and $headerIds.Add(($node.GetRuntimeId() -join ','))){$headers+=,$node}
+  }
+ }
+ if($headers.Count -ne 1){@{state='unknown';reason='unique_analyzer_panel_unavailable'}|ConvertTo-Json -Compress;exit}
+ $walker=[System.Windows.Automation.TreeWalker]::RawViewWalker
+ $cursor=$headers[0];$panel=$null;$insideCard=$false
+ for($level=0;$cursor -and $level -lt 12;$level++){
+  if($cursor.Current.ClassName -match 'card-item|resume-item|resume-text'){ $insideCard=$true;break }
+  if($cursor.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document){break}
+  if($level -gt 0 -and !$cursor.Current.IsOffscreen -and $cursor.Current.BoundingRectangle.Width -le $root.Current.BoundingRectangle.Width*0.65){$panel=$cursor}
+  $cursor=$walker.GetParent($cursor)
+ }
+ if($insideCard -or !$panel){@{state='unknown';reason='analyzer_scope_unconfirmed'}|ConvertTo-Json -Compress;exit}
+ $labels=@();$hiddenLabel=$false;$seenLabels=[Collections.Generic.HashSet[string]]::new()
+ $textCondition=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Text)
+ $panelTexts=@($panel.FindAll([System.Windows.Automation.TreeScope]::Descendants,$textCondition))
+ if($panelTexts.Count -gt 120){@{state='unknown';reason='analyzer_scope_too_broad'}|ConvertTo-Json -Compress;exit}
+ foreach($node in $panelTexts){
+   if($node.Current.Name -match '^偏好地点(?:\s|[：:]|$)'){
+    if($node.Current.IsOffscreen){$hiddenLabel=$true}
+    elseif($seenLabels.Add(($node.GetRuntimeId() -join ','))){$labels+=,$node}
+   }
+ }
+ if($labels.Count -eq 0){
+  $complete=($panel.Current.ItemStatus -in @('ready','complete','loaded') -or @($panelTexts|Where-Object {!$_.Current.IsOffscreen -and $_.Current.Name -in @('分析完成','解析完成')}).Count -gt 0)
+  $unread=@($panelTexts|Where-Object {$_.Current.Name -and $_.Current.IsOffscreen}).Count -gt 0
+  $loading=@($panelTexts|Where-Object {$_.Current.Name -match '加载中|分析中|正在解析|展开更多'}).Count -gt 0
+  $expandCondition=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::IsExpandCollapsePatternAvailableProperty,$true)
+  foreach($node in $panel.FindAll([System.Windows.Automation.TreeScope]::Descendants,$expandCondition)){
+   $expander=$null
+   if($node.TryGetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern,[ref]$expander) -and $expander.Current.ExpandCollapseState -in @([System.Windows.Automation.ExpandCollapseState]::Collapsed,[System.Windows.Automation.ExpandCollapseState]::PartiallyExpanded)){$unread=$true}
+  }
+  $scroll=$null
+  $canScroll=$panel.TryGetCurrentPattern([System.Windows.Automation.ScrollPattern]::Pattern,[ref]$scroll) -and $scroll.Current.VerticallyScrollable
+  $scrollCondition=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::IsScrollPatternAvailableProperty,$true)
+  foreach($node in $panel.FindAll([System.Windows.Automation.TreeScope]::Descendants,$scrollCondition)){
+   $childScroll=$null
+   if($node.TryGetCurrentPattern([System.Windows.Automation.ScrollPattern]::Pattern,[ref]$childScroll) -and $childScroll.Current.VerticallyScrollable){$canScroll=$true}
+  }
+  $absent=$complete -and !$hiddenLabel -and !$unread -and !$loading -and !$canScroll
+  @{state=$(if($absent){'absent'}else{'unknown'});source='directed_analyzer_preference';reason=$(if($absent){'completed_analyzer_has_no_preference_field'}else{'analyzer_not_completely_inspected'})}|ConvertTo-Json -Compress;exit
+ }
+ if($labels.Count -ne 1){@{state='unknown';reason='preference_label_not_unique'}|ConvertTo-Json -Compress;exit}
+ $label=$labels[0];$text=($label.Current.Name -replace '^偏好地点[：:\s]*','').Trim()
+ if(!$text){
+  $parent=$walker.GetParent($label)
+  if($parent -and $parent.Current.ControlType -ne [System.Windows.Automation.ControlType]::Document -and $parent.Current.BoundingRectangle.Width -le $root.Current.BoundingRectangle.Width*0.65){
+   $rowTexts=@($parent.FindAll([System.Windows.Automation.TreeScope]::Descendants,$textCondition)|Where-Object {!$_.Current.IsOffscreen -and $_.Current.Name})
+   $next=$walker.GetNextSibling($label)
+   if($rowTexts.Count -eq 2 -and $next -and !$next.Current.IsOffscreen -and $next.Current.ControlType -eq [System.Windows.Automation.ControlType]::Text -and ($next.GetRuntimeId() -join ',') -eq ($rowTexts[1].GetRuntimeId() -join ',')){$text=$next.Current.Name}
+  }
+ }
+ if($text -match '(?:现居|年龄|性别|薪资|期望职位|工作地点|任职|籍贯)\s*[：:]'){$text=''}
+ @{state=$(if($text){'present'}else{'unknown'});text=$text;source='directed_analyzer_preference';label_runtime_id=$label.GetRuntimeId()}|ConvertTo-Json -Depth 4 -Compress;exit
+}
 if($Action -in @('FilterState','LayoutState')){
  $buttons=@();$seenButtons=[Collections.Generic.HashSet[string]]::new()
  $fc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ClassNameProperty,'filter-label-wrap')

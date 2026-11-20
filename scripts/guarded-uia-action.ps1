@@ -53,7 +53,7 @@ elseif($Action -eq 'Scroll'){
  $scroll=$null
  if(!$element.TryGetCurrentPattern([System.Windows.Automation.ScrollPattern]::Pattern,[ref]$scroll)){throw 'scroll_not_supported'}
  Assert-BossBrowserTarget $element ([long]$t.hwnd)
- $scroll.Scroll([System.Windows.Automation.ScrollAmount]::NoAmount,[System.Windows.Automation.ScrollAmount]::SmallIncrement)
+ $scroll.Scroll([System.Windows.Automation.ScrollAmount]::NoAmount,[System.Windows.Automation.ScrollAmount]::LargeIncrement)
 }
 elseif($Action -eq 'Reveal'){
  $scrollItem=$null

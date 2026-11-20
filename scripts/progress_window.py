@@ -545,6 +545,11 @@ class ProgressWindow:
         try:
             data = self.read()
             state = data["state"]
+            with contextlib.closing(ledger.connect(self.db_path)) as monitor_db:
+                monitor = monitor_db.execute('SELECT value FROM settings WHERE key=?', ('chat_watchdog/'+self.run_id,)).fetchone()
+            monitor = json.loads(monitor[0]) if monitor else {}
+            import chat_watchdog
+            monitor = chat_watchdog.display_state(monitor)
             if not self.demo: self.wake.set_running(state in ("running","draining"))
             if state in ("expired","stopped") or (state=="draining" and data["current"] is None):
                 self.begin_termination("run_expired" if state=="expired" else data.get("drain_reason") or "manual_stop")
@@ -563,12 +568,14 @@ class ProgressWindow:
             elif state=='paused' and interrupt=='unconfirmed':
                 step='招聘已暂停，尚未确认聊天停止，请检查Codex状态'
             self.status_canvas.itemconfigure(
-                self.state_item, text=f"{label} · {data['elapsed']} · {step}"
+                self.state_item, text=f"{label} · {data['elapsed']} · {step}"+(' · GPT'+{'active':'运行中','idle':'空闲','unknown':'状态未知'}.get(monitor.get('measured'),'状态未知') if monitor else '')
             )
-            metrics_key = (data.get("daily_judged"),data.get("daily_resume_viewed"),data.get("daily_sent"),data["remaining_minutes"],data.get("report_pending"),data.get('viewing_average_seconds'))
+            metrics_key = (data.get("daily_judged"),data.get("daily_resume_viewed"),data.get("daily_sent"),data["remaining_minutes"],data.get("report_pending"),data.get('viewing_average_seconds'),monitor.get('alert'))
             if metrics_key != self.detail_metrics_key:
                 self.status_canvas.itemconfigure(self.detail_item, text=metrics_text(data))
                 self.detail_metrics_key = metrics_key
+            if monitor.get('alert'):
+                self.status_canvas.itemconfigure(self.detail_item, text=monitor['alert'])
             self.pause_enabled = state == 'running' and not getattr(self,'pausing',False)
             self.button_enabled = [self.pause_enabled, True, True]
             self.button_canvas.itemconfigure(

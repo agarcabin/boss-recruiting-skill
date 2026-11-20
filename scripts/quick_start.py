@@ -159,6 +159,11 @@ def refresh_selected(plan, db_path=None):
 
 
 def main():
+    try:
+        import mcp_config
+        mcp_config.ensure()
+    except Exception:
+        pass
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--prompt');p.add_argument('--plan',type=Path)
     p.add_argument('--state-dir',type=Path,default=startup_plan.DEFAULT_ROOT)

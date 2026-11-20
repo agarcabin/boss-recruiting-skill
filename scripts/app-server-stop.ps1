@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$Binding,[ValidateSet('Probe','Stop')][string]$Action='Probe')
+param([Parameter(Mandatory=$true)][string]$Binding,[ValidateSet('Probe','Stop','RecoveryProbe','Resume')][string]$Action='Probe',[string]$RunId)
 $OutputEncoding = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = $OutputEncoding
 
@@ -40,6 +40,28 @@ try{
  Send-Object @{method='initialized';params=@{}}
  $result=Invoke-Rpc 2 'thread/read' @{threadId=$b.thread_id;includeTurns=$true}
  $turns=@($result.thread.turns)
+ if($Action -in @('RecoveryProbe','Resume')){
+  if(!$b.desktop_thread_verified -or !$b.thread_id){throw 'verified_desktop_thread_required'}
+  $last=if($turns.Count){$turns[-1]}else{$null}
+  if($last -and $last.status -eq 'interrupted'){@{state='user_stop';can_resume=$false}|ConvertTo-Json -Compress;exit}
+  if($last -and $last.status -in @('inProgress','in_progress')){@{state='active';can_resume=$false}|ConvertTo-Json -Compress;exit}
+  $threadState=if($result.thread.status -is [string]){$result.thread.status}else{$result.thread.status.type}
+  if($threadState -ne 'idle'){@{state='unknown';reason='desktop_thread_not_confirmed_idle'}|ConvertTo-Json -Compress;exit}
+  # A completed question also looks idle. Only a desktop-owned atomic guard can
+  # establish that no draft, queued input, approval, or question needs the user.
+  if(!$b.recovery_guard_method -or !$b.recovery_dispatch_method){@{state='unknown';reason='guarded_desktop_recovery_unsupported';can_resume=$false}|ConvertTo-Json -Compress;exit}
+  $guard=Invoke-Rpc 3 $b.recovery_guard_method @{threadId=$b.thread_id;expectedTurnId=$last.id;runId=$RunId}
+  if($guard.userStopped -eq $true){@{state='user_stop';can_resume=$false}|ConvertTo-Json -Compress;exit}
+  if($guard.noUserInput -ne $true -or $guard.noPendingQuestion -ne $true -or $guard.noQueuedInput -ne $true -or $guard.noApproval -ne $true -or $guard.noDraft -ne $true -or !$guard.guardToken){@{state='unknown';reason='desktop_user_input_gate_unconfirmed';can_resume=$false}|ConvertTo-Json -Compress;exit}
+  if($Action -eq 'RecoveryProbe'){@{state='idle';can_resume=$true}|ConvertTo-Json -Compress;exit}
+  if($RunId -notmatch '^[A-Za-z0-9_-]+$'){throw 'invalid_recovery_run_id'}
+  $message="继续当前招聘任务；沿用运行 $RunId，从现有检查点处理，不新建运行、不重复招呼。先核对该运行尚未暂停或结束，再继续。"
+  # The configured desktop method must atomically consume the one-use guard
+  # token and recheck idle/user state; plain turn/start cannot provide that.
+  $started=Invoke-Rpc 4 $b.recovery_dispatch_method @{threadId=$b.thread_id;expectedTurnId=$last.id;guardToken=$guard.guardToken;runId=$RunId;text=$message}
+  if(!$started.turn.id){throw 'resume_turn_not_acknowledged'}
+  @{state='started';thread_id=$b.thread_id;turn_id=$started.turn.id}|ConvertTo-Json -Compress;exit
+ }
  if(!$turns.Count -or $turns[-1].status -notin @('inProgress','in_progress')){
   @{state='idle';kind='app_server'}|ConvertTo-Json -Compress
   exit 0

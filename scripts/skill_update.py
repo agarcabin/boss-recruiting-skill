@@ -143,10 +143,10 @@ def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def build(root,output,legacy_dir=None,public_root=None,include_user_projects=False):
+def build(root,output,legacy_dir=None,public_root=None,include_user_projects=False,release_channel=None):
     import release_builder
     public_root=public_root or Path(output)/('source-'+uuid.uuid4().hex[:8])
-    return release_builder.build(root,output,public_root,legacy_dir,include_user_projects)
+    return release_builder.build(root,output,public_root,legacy_dir,include_user_projects,release_channel)
 
 
 
@@ -351,11 +351,17 @@ def update(root: Path, backups: Path | None = None, database: Path | None = None
         if installed_version(root) != result['current_version']:
             raise ValueError('local_version_changed_during_update')
         backup = install(root, files, backups or state_dir() / 'updates' / 'backups',database=database)
+    try:
+        import mcp_config
+        mcp = mcp_config.ensure(root)
+    except Exception as exc:
+        mcp = dict(state='skipped', reason=str(exc)[:300])
     return dict(state='updated', previous_version=result['current_version'], version=installed_version(root),
                 backup=str(backup), release_url=result['release_url'], reload_skill=True,
                 update_route=result.get('update_route'),download_route=result.get('download_route'),
                 release_channel=result.get('release_channel'),update_branch=result.get('update_branch'),
-                route_failures=result.get('route_failures',[]),download_route_failures=result.get('download_route_failures',[]))
+                route_failures=result.get('route_failures',[]),download_route_failures=result.get('download_route_failures',[]),
+                mcp=mcp)
 
 
 def main() -> None:
@@ -367,12 +373,13 @@ def main() -> None:
     p.add_argument('--include-user-projects',action='store_true',help='Explicitly include self-created projects in the encrypted snapshot.')
     p.add_argument('--archive',type=Path);p.add_argument('--signature',type=Path);p.add_argument('--runtime-source',type=Path);p.add_argument('--backup',type=Path)
     p.add_argument('--channel', choices=('beta','stable','main'), help='Update channel: beta or the stable main line.')
+    p.add_argument('--release-channel', choices=('stable','beta'), help='Explicit local package channel; does not publish.')
     args = p.parse_args()
     try:
         if args.action == 'build':
             if not args.output:
                 p.error('build requires --output')
-            result = build(args.root,args.output,args.legacy_dir,args.public_root,args.include_user_projects)
+            result = build(args.root,args.output,args.legacy_dir,args.public_root,args.include_user_projects,args.release_channel)
         elif args.action=='install-local':
             if not args.archive or not args.signature:raise ValueError('archive_and_signature_required')
             data=args.archive.read_bytes();verify_archive(data,args.signature.read_bytes(),ROOT)
@@ -381,7 +388,12 @@ def main() -> None:
             files=unpack(data,expected_version,source(ROOT)['repository'])
             with update_lock(state_dir()/'updates'):
                 backup=install(args.root,files,state_dir()/'updates/backups',runtime_source=args.runtime_source)
-            result=dict(state='installed',version=installed_version(args.root),backup=str(backup))
+            try:
+                import mcp_config
+                mcp=mcp_config.ensure(args.root)
+            except Exception as exc:
+                mcp=dict(state='skipped',reason=str(exc)[:300])
+            result=dict(state='installed',version=installed_version(args.root),backup=str(backup),mcp=mcp)
         elif args.action=='recover':
             import install_engine
             if not args.backup:raise ValueError('backup_required')
