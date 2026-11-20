@@ -33,6 +33,8 @@ def main():
         with local_mutex.locked('recruiting-startup:'+run_admission.path(db).casefold()):
             if ledger.run_row(db,a.run)['stop_reason']:raise ValueError('run_already_stopped')
             run_cleanup.close_previous(db,keep_run=a.run,root=a.output_root)
+            import chat_watchdog
+            chat_watchdog.ensure(db,a.run,a.db)
             owner=db.execute('SELECT pid,birth FROM overlay_owner WHERE run_id=?',(a.run,)).fetchone()
             if owner and run_cleanup.alive(owner['pid'],owner['birth']):
                 ledger.output(state='overlay_already_running',pid=owner['pid'],run_id=a.run)

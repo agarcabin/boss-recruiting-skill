@@ -11,7 +11,7 @@ import workspace_paths
 
 
 def changed(text):
-    pattern=r'(^### +2\.\s*减分词库[^\n]*\n)([\s\S]*?)(?=^#{1,3} |\Z)'
+    pattern=r'(^### +2\.\s*(?:减分词库|否决词库)[^\n]*\n)([\s\S]*?)(?=^#{1,3} |\Z)'
     def section(match):
         lines=[]
         for line in match[2].splitlines(keepends=True):

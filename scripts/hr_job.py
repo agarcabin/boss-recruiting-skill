@@ -11,8 +11,9 @@ class ConfigError(ValueError):
 
 
 HEADINGS = ('一、列表卡片', '二、电子简历', '三、其他配置')
-SETTINGS = ('单简历查看时间（为期望平均值）', '查看十人后休息', '同事几天以上可打招呼', '三句招呼（关闭为单句）', 'AI总评')
+SETTINGS = ('单简历查看时间（为期望平均值）', '查看十人后休息', '同事几天以上可打招呼', '三句招呼（关闭为单句）', 'AI优缺点判断')
 SETTING_ALIASES = {
+    'AI总评': SETTINGS[4],
     '单简历查看时间（不足时补足）': SETTINGS[0],
     '单简历查看时间不低于': SETTINGS[0],
     '连续招呼五次后额外休息': SETTINGS[1],
@@ -20,6 +21,9 @@ SETTING_ALIASES = {
     '同事几天以上可打招呼（填0为不判断同事）': SETTINGS[2],
 }
 OVERALL_REVIEW = '减分至合格线后AI整体复盘'
+PASS_REVIEW = '过及格线就进行AI整体复盘'
+LOCATION_FILTER = '偏好地点筛选'
+TEXT_SECTIONS = ('AI整体复盘规则', '偏好地点筛选')
 
 
 def is_hr(text):
@@ -31,7 +35,7 @@ def clean(text):
     lines = []
     for line in text.splitlines():
         line = re.sub(r'^\s*(?:>\s*)?(?:[-*]\s+)?', '', line).strip()
-        if line and not line.startswith(('注释：', '注释:', '说明：', '说明:')):
+        if line and not line.startswith(('注释：', '注释:', '说明：', '说明:', '备注：', '备注:')):
             lines.append(line)
     return '\n'.join(lines)
 
@@ -97,17 +101,22 @@ def parse(text):
         raise ConfigError('请在第一行填写实际岗位名称')
     sections, current, sub = {}, None, None
     for line in text.splitlines():
-        heading = re.fullmatch(r'## +(.+?)\s*', line)
-        item = re.fullmatch(r'### +([123])\.\s*(初筛词库|减分词库|误判复诊)\s*', line)
+        location_switch = re.fullmatch(r'##\s*偏好地点筛选\s*[：:]\s*(开|关)\s*', line)
+        if location_switch:
+            if current != HEADINGS[2]:raise ConfigError('偏好地点筛选开关请放在其他配置中')
+            sections[current].setdefault(None, []).append(LOCATION_FILTER+'：'+location_switch[1])
+            continue
+        heading = re.fullmatch(r'##\s*([^#].+?)\s*[：:]?\s*', line)
+        item = re.fullmatch(r'### +([123])\.\s*(初筛词库|减分词库|否决词库|误判复诊)\s*', line)
         if heading:
-            current, sub = heading[1], None
-            if current not in HEADINGS or current in sections:
+            current, sub = heading[1].rstrip('：:').strip(), None
+            if current not in (*HEADINGS, *TEXT_SECTIONS) or current in sections:
                 raise ConfigError('请保留模板的三个板块，且不要重复')
             sections[current] = {}
         elif item:
-            if current not in HEADINGS[:2] or not ((item[1], item[2]) in (('1', '初筛词库'), ('2', '减分词库')) or (current == HEADINGS[1] and (item[1], item[2]) == ('3', '误判复诊'))):
+            if current not in HEADINGS[:2] or not ((item[1], item[2]) in (('1', '初筛词库'), ('2', '减分词库')) or (current == HEADINGS[0] and (item[1], item[2]) == ('2', '否决词库')) or (current == HEADINGS[1] and (item[1], item[2]) == ('3', '误判复诊'))):
                 raise ConfigError('词库小标题与模板不一致')
-            sub = item[2]
+            sub = '减分词库' if item[2] == '否决词库' else item[2]
             if sub in sections[current]:
                 raise ConfigError('词库小标题不能重复')
             sections[current][sub] = []
@@ -115,7 +124,7 @@ def parse(text):
             raise ConfigError('请保留模板中的词库小标题')
         elif current:
             sections[current].setdefault(sub, []).append(line)
-    if set(sections) != set(HEADINGS):
+    if not set(HEADINGS) <= set(sections):
         raise ConfigError('请保留列表卡片、电子简历、其他配置三个板块')
     config = dict(format='hr-job/v1', position=titles[0])
     for title, stage in zip(HEADINGS[:2], ('list', 'resume')):
@@ -133,20 +142,24 @@ def parse(text):
     for line in clean('\n'.join(sections[HEADINGS[2]].get(None, []))).splitlines():
         match = re.fullmatch(r'(.+?)\s*[：:]\s*(.*)', line)
         label = SETTING_ALIASES.get(match[1], match[1]) if match else None
-        if not match or label not in (*SETTINGS, OVERALL_REVIEW) or label in settings:
+        if not match or label not in (*SETTINGS, OVERALL_REVIEW, PASS_REVIEW, LOCATION_FILTER) or label in settings:
             raise ConfigError('其他配置名称与模板不一致，或重复填写')
         settings[label] = match[2]
     settings.setdefault(SETTINGS[0], '30 秒')
     settings.setdefault(OVERALL_REVIEW, '开')
-    settings.setdefault('AI总评', '关')
-    if set(settings) != set(SETTINGS) | {OVERALL_REVIEW}:
+    settings.setdefault(SETTINGS[4], '关')
+    settings.setdefault(PASS_REVIEW, '关')
+    # Missing in old documents/snapshots means the pre-switch behavior remains.
+    settings.setdefault(LOCATION_FILTER, '开')
+    if set(settings) != set(SETTINGS) | {OVERALL_REVIEW, PASS_REVIEW, LOCATION_FILTER}:
         raise ConfigError('请填写其他配置中的设置项')
     if settings[SETTINGS[3]] not in ('开', '关'):
         raise ConfigError('三句招呼请填写“开”或“关”')
     if settings[OVERALL_REVIEW] not in ('开', '关'):
         raise ConfigError(OVERALL_REVIEW+'请填写“开”或“关”')
-    if settings['AI总评'] not in ('开', '关'):
-        raise ConfigError('AI总评请填写“开”或“关”')
+    if settings[SETTINGS[4]] not in ('开', '关') or settings[PASS_REVIEW] not in ('开', '关'):
+        raise ConfigError('AI优缺点判断及达标复盘请填写“开”或“关”')
+    if settings[LOCATION_FILTER] not in ('开', '关'):raise ConfigError('偏好地点筛选开关请填写“开”或“关”')
     config.update(average_seconds=duration(settings[SETTINGS[0]], SETTINGS[0]),
                   rest_seconds=duration(settings[SETTINGS[1]], SETTINGS[1]),
                   coworker_days=duration(settings[SETTINGS[2]], SETTINGS[2], True),
@@ -155,7 +168,12 @@ def parse(text):
     config['coworker_zero_disables'] = True
     config['rest_after_greetings'] = 5
     config['overall_review'] = settings[OVERALL_REVIEW] == '开'
-    config['ai_total_review'] = settings['AI总评'] == '开'
+    config['ai_total_review'] = settings[SETTINGS[4]] == '开'
+    config['overall_review_on_pass'] = settings[PASS_REVIEW] == '开'
+    config['preferred_location_filter_enabled'] = settings[LOCATION_FILTER] == '开'
+    config['overall_review_rules'] = clean('\n'.join(sections.get(TEXT_SECTIONS[0], {}).get(None, [])))
+    import preferred_locations
+    config['preferred_locations'] = preferred_locations.parse_config(clean('\n'.join(sections.get(TEXT_SECTIONS[1], {}).get(None, []))))
     return config
 
 
@@ -185,7 +203,7 @@ def snapshot(profile):
                 greeting_mode=config['greeting_mode'], browser_target='codex_iab', pdf_required=False,
                 list_prefilter=True, ai_pros_cons=config['ai_total_review'], short_view_wait=True, coworker_skip_wait_exempt=True,
                 release_policy=1410, current_rules=20261115, view_wait_policy=3, coworker_notice_policy=1,
-                csv_reports=False, ocr_highlights=True, page_layout_policy=1)
+                csv_reports=False, ocr_highlights=True, page_layout_policy=1, review_policy_version=151)
 
 
 def match(config, text, grouped):
@@ -216,9 +234,16 @@ def list_assessment(rules, payload):
     result = match(config, text, False)
     readable = bool(text.strip()) or not (config['groups'] or config['negative'])
     if rules.get('current_rules'):
-        scores = keyword_score(config, result)
+        new_veto = rules.get('review_policy_version', 0) >= 151
+        if new_veto:
+            # A list veto is literal occurrence, independent of positive-word
+            # negation heuristics, and never subtracts from the list score.
+            result['negative_hits'] = [dict(word=word, quote=text) for word in config['negative']
+                                       if result['positive_eligible'] and word.casefold() in text.casefold()]
+        scores = keyword_score(config, dict(result, negative_hits=[]) if new_veto else result)
+        veto = new_veto and bool(result['negative_hits'])
         return dict(result, **scores, configured=True, readable=readable,
-                    eligible=readable and result['positive_eligible'] and scores['score'] >= scores['qualifying_score'])
+                    vetoed=veto, eligible=readable and result['positive_eligible'] and not veto and scores['score'] >= scores['qualifying_score'])
     return dict(result, configured=True, readable=readable, eligible=readable and result['eligible'])
 
 
@@ -253,6 +278,13 @@ def assessment(rules, payload):
         calculated.update(scores, eligible=eligible, direct_channels=['hr_job'] if eligible else [])
         if complete and result['positive_eligible'] and not eligible:
             calculated.update(trigger='negative_below_threshold', summary='命中减分词后低于合格线：'+str(scores['score'])+'分；'+summary)
+        if rules.get('review_policy_version', 0) >= 151:
+            import preferred_locations
+            place = preferred_locations.evaluate(rules['hr_job_config'], payload)
+            calculated['location_decision'] = place
+            if place['state'] in ('mismatch', 'unknown'):
+                calculated.update(eligible=False, direct_channels=[], trigger='location_'+place['state'],
+                                  summary=place['reason'])
         import overall_review
         calculated = overall_review.apply(rules, payload, calculated)
     return calculated

@@ -143,10 +143,10 @@ def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def build(root,output,legacy_dir=None,public_root=None,include_user_projects=False):
+def build(root,output,legacy_dir=None,public_root=None,include_user_projects=False,release_channel=None):
     import release_builder
     public_root=public_root or Path(output)/('source-'+uuid.uuid4().hex[:8])
-    return release_builder.build(root,output,public_root,legacy_dir,include_user_projects)
+    return release_builder.build(root,output,public_root,legacy_dir,include_user_projects,release_channel)
 
 
 
@@ -367,12 +367,13 @@ def main() -> None:
     p.add_argument('--include-user-projects',action='store_true',help='Explicitly include self-created projects in the encrypted snapshot.')
     p.add_argument('--archive',type=Path);p.add_argument('--signature',type=Path);p.add_argument('--runtime-source',type=Path);p.add_argument('--backup',type=Path)
     p.add_argument('--channel', choices=('beta','stable','main'), help='Update channel: beta or the stable main line.')
+    p.add_argument('--release-channel', choices=('stable','beta'), help='Explicit local package channel; does not publish.')
     args = p.parse_args()
     try:
         if args.action == 'build':
             if not args.output:
                 p.error('build requires --output')
-            result = build(args.root,args.output,args.legacy_dir,args.public_root,args.include_user_projects)
+            result = build(args.root,args.output,args.legacy_dir,args.public_root,args.include_user_projects,args.release_channel)
         elif args.action=='install-local':
             if not args.archive or not args.signature:raise ValueError('archive_and_signature_required')
             data=args.archive.read_bytes();verify_archive(data,args.signature.read_bytes(),ROOT)

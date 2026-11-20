@@ -42,7 +42,8 @@ def close_previous(db, keep_run=None, root=None):
             continue
         # Persist the stop before closing any window or worker. Never stop Codex.
         run_safety.request_stop(db, run_id, 'replaced_by_new_run')
-        tables = ['overlay_owner'] + (['workflow_owner'] if has_worker else [])
+        has_watchdog = db.execute("SELECT 1 FROM sqlite_master WHERE name='watchdog_owner'").fetchone()
+        tables = ['overlay_owner'] + (['workflow_owner'] if has_worker else []) + (['watchdog_owner'] if has_watchdog else [])
         for table in tables:
             owner = db.execute(f'SELECT pid,birth FROM {table} WHERE run_id=?', (run_id,)).fetchone()
             if owner:

@@ -30,9 +30,12 @@ def write_pin(root,record):
     crypto.atomic(Path(root)/'scripts/publisher_pin.py',("PUBLIC_KEY_B64 = "+repr(crypto.b64(public))+"\n").encode())
     return public
 
-def release_version(root,base_version):
+def release_version(root,base_version,channel=None):
     """Use a beta channel only for the WeCom migration worktree."""
     base_version=base_version.removesuffix('-beta')
+    if channel is not None:
+        if channel not in ('stable', 'beta'):raise ValueError('invalid_build_release_channel')
+        return base_version+'-beta' if channel == 'beta' else base_version
     try:
         branch=subprocess.run(['git','-C',str(root),'branch','--show-current'],
                               capture_output=True,text=True,encoding='utf-8',
@@ -175,11 +178,11 @@ def sanitize_text(text,payload):
         if word:text=text.replace(word,'ExampleEntity'+str(index))
     return text
 
-def build(root,output,public_root,legacy_dir=None,include_user_projects=False):
+def build(root,output,public_root,legacy_dir=None,include_user_projects=False,release_channel=None):
     root=Path(root);output=Path(output);public_root=Path(public_root)
     from skill_update import installed_version,release_base_version
     base_version=release_base_version(installed_version(root))
-    version=release_version(root,base_version)
+    version=release_version(root,base_version,release_channel)
     if public_root.exists() and any(public_root.iterdir()):raise ValueError('public_source_target_must_be_empty')
     record=issuer();payload=collect(root,include_user_projects);legacy=materials(legacy_dir)
     if not project_vault.vault_path(root).is_file():
@@ -204,7 +207,7 @@ def build(root,output,public_root,legacy_dir=None,include_user_projects=False):
     for name in ('scripts','references','agents','docs'):
         for path in (root/name).rglob('*'):
             if not path.is_file() or path.suffix not in ('.py','.ps1','.md','.json','.yaml','.yml','.txt') or '__pycache__' in path.parts:continue
-            if path.name.startswith('test_') and path.name not in ('test_core_contract.py','test_release149.py','test_release1410.py','test_hr_job.py','test_local_startup.py','test_misjudgment_review.py','test_layout_startup.py','test_notice_wait.py','test_report_layout.py','test_stop_feedback.py','test_adaptive_timing.py'):continue
+            if path.name.startswith('test_') and path.name not in ('test_core_contract.py','test_release149.py','test_release1410.py','test_hr_job.py','test_local_startup.py','test_misjudgment_review.py','test_layout_startup.py','test_notice_wait.py','test_report_layout.py','test_stop_feedback.py','test_adaptive_timing.py','test_policy151.py'):continue
             if path.name in ('resume-extraction-test-results.md','resume-extraction-test-plan.md','uia-resume-diagnostic-report.md'):continue
             if name=='references' and path.name in ('recruiting-rules.json','project-vault.json','publisher-key.json'):continue
             relative=path.relative_to(root).as_posix()
@@ -269,6 +272,7 @@ def main():
     p.add_argument('--root',type=Path,default=Path(__file__).resolve().parents[1]);p.add_argument('--output',type=Path)
     p.add_argument('--public-root',type=Path);p.add_argument('--legacy-dir',type=Path);p.add_argument('--password-stdin',action='store_true');p.add_argument('--password-prompt',action='store_true')
     p.add_argument('--include-user-projects',action='store_true',help='Include self-created projects in the encrypted snapshot only when explicitly requested.')
+    p.add_argument('--release-channel',choices=('stable','beta'),help='Explicit local build channel; defaults to checkout branch.')
     a=p.parse_args()
     if a.command=='init':
         if not a.password_stdin and not a.password_prompt:raise ValueError('use_password_stdin_or_prompt')
@@ -281,6 +285,6 @@ def main():
         result=initialize(a.root,password)
     else:
         if not a.output or not a.public_root:raise ValueError('output_and_public_root_required')
-        result=build(a.root,a.output,a.public_root,a.legacy_dir,a.include_user_projects)
+        result=build(a.root,a.output,a.public_root,a.legacy_dir,a.include_user_projects,a.release_channel)
     print(json.dumps(result,ensure_ascii=False))
 if __name__=='__main__':main()
