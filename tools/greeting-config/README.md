@@ -4,7 +4,7 @@
 
 ## 下载与运行
 
-从 GitHub Releases 下载 `打开招呼配置.exe`，放入「02 招呼配置」目录后双击运行。
+从 GitHub Releases 下载 `greeting-config.exe`，重命名为 `打开招呼配置.exe`，放入「02 招呼配置」目录后双击运行。
 
 程序会读取自身所在目录及下级公司目录中的 `.md` 文件，支持：
 
