@@ -70,25 +70,7 @@ public static class NativeMouseTrajectory
     public static extern bool IsZoomed(IntPtr hWnd);
 
     [DllImport("user32.dll")]
-    public static extern bool SetForegroundWindow(IntPtr hWnd);
-
-    [DllImport("user32.dll")]
-    public static extern bool BringWindowToTop(IntPtr hWnd);
-
-    [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
-
-    [DllImport("user32.dll")]
-    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
-
-    [DllImport("user32.dll")]
-    public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
-
-    [DllImport("user32.dll")]
-    public static extern IntPtr SetFocus(IntPtr hWnd);
-
-    [DllImport("user32.dll")]
-    public static extern bool ShowWindow(IntPtr hWnd, int command);
 
     [DllImport("user32.dll")]
     public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
@@ -128,54 +110,7 @@ if (-not $DryRun -and $WindowHandle -ne [IntPtr]::Zero) {
     }
 
     if ([NativeMouseTrajectory]::GetForegroundWindow() -ne $WindowHandle) {
-        if (-not [NativeMouseTrajectory]::IsZoomed($WindowHandle)) {
-            $null=Get-BossBrowserRoot ([long]$WindowHandle)
-            [void][NativeMouseTrajectory]::ShowWindow($WindowHandle, 3)
-            throw "目标窗口原本未最大化，已切换为最大化；请重新获取页面坐标和内容边界后再执行。未发送鼠标输入。"
-        }
-
-        $foregroundWindow = [NativeMouseTrajectory]::GetForegroundWindow()
-        $foregroundProcessId = [uint32]0
-        $targetProcessId = [uint32]0
-        $foregroundThread = [NativeMouseTrajectory]::GetWindowThreadProcessId(
-            $foregroundWindow,
-            [ref]$foregroundProcessId
-        )
-        $targetThread = [NativeMouseTrajectory]::GetWindowThreadProcessId(
-            $WindowHandle,
-            [ref]$targetProcessId
-        )
-        $attached = $false
-        if ($foregroundThread -ne 0 -and
-            $targetThread -ne 0 -and
-            $foregroundThread -ne $targetThread) {
-            $attached = [NativeMouseTrajectory]::AttachThreadInput(
-                $foregroundThread,
-                $targetThread,
-                $true
-            )
-        }
-
-        try {
-            [void][NativeMouseTrajectory]::BringWindowToTop($WindowHandle)
-            $null=Get-BossBrowserRoot ([long]$WindowHandle)
-            [void][NativeMouseTrajectory]::SetForegroundWindow($WindowHandle)
-            [void][NativeMouseTrajectory]::SetFocus($WindowHandle)
-        }
-        finally {
-            if ($attached) {
-                [void][NativeMouseTrajectory]::AttachThreadInput(
-                    $foregroundThread,
-                    $targetThread,
-                    $false
-                )
-            }
-        }
-        [System.Threading.Thread]::Sleep(250)
-    }
-
-    if ([NativeMouseTrajectory]::GetForegroundWindow() -ne $WindowHandle) {
-        throw "无法将目标窗口切换到前台，未发送任何鼠标输入。"
+        throw "鼠标操作需要目标窗口已有焦点；程序不会自动切换前台，未发送任何鼠标输入。"
     }
 }
 

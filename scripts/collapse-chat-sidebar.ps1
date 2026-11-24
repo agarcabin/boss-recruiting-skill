@@ -4,7 +4,13 @@ $OutputEncoding=[Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding=$OutputEncoding
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
-$resolved=& (Join-Path $PSScriptRoot 'resolve-recruiting-window.ps1') -ChatTitle $ChatTitle | ConvertFrom-Json
+$resolved=$null
+for($attempt=0;$attempt -lt 3;$attempt++){
+ $raw=& (Join-Path $PSScriptRoot 'resolve-recruiting-window.ps1') -ChatTitle $ChatTitle
+ try{$candidate=$raw|ConvertFrom-Json}catch{$candidate=$null}
+ if($candidate -and $candidate.state -eq 'resolved'){$resolved=$candidate;break}
+ if($attempt -lt 2){Start-Sleep -Milliseconds 400}
+}
 if(!$resolved -or $resolved.state -ne 'resolved'){throw 'sidebar_current_chat_unavailable'}
 $root=[System.Windows.Automation.AutomationElement]::FromHandle([IntPtr][long]$resolved.window.hwnd)
 $condition=[System.Windows.Automation.PropertyCondition]::new(

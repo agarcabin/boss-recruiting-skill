@@ -10,8 +10,19 @@ import ledger
 def launch_process(command):
     if os.name!='nt': raise RuntimeError('windows_overlay_required')
     flags=subprocess.DETACHED_PROCESS|subprocess.CREATE_NEW_PROCESS_GROUP|subprocess.CREATE_BREAKAWAY_FROM_JOB
-    # No fallback into the agent job: cancelling that job must not kill finalization.
-    return subprocess.Popen(command,creationflags=flags,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    startup=subprocess.STARTUPINFO()
+    startup.dwFlags|=subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow=0  # Keep implicit startup windows hidden until configured.
+    # Never drop BREAKAWAY and inherit the cancellable agent job. Windows error 5
+    # may instead use an on-demand broker under the same interactive user.
+    try:
+        return subprocess.Popen(command,creationflags=flags,startupinfo=startup,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    except OSError as exc:
+        if getattr(exc,'winerror',None)!=5:raise
+        import background_launch
+        try:return background_launch.launch(command)
+        except Exception as broker_error:
+            raise RuntimeError('Windows 拒绝直接启动后台进程（错误 5），同用户备用通道也未能完成：'+str(broker_error)) from broker_error
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--db',type=Path,default=ledger.DEFAULT_DB)

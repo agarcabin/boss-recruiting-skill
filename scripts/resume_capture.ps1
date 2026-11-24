@@ -21,6 +21,7 @@ Add-Type -AssemblyName UIAutomationTypes
 . (Join-Path $PSScriptRoot 'boss-browser-binding.ps1')
 . (Join-Path $PSScriptRoot 'native-json.ps1')
 . (Join-Path $PSScriptRoot 'resume-single-page.ps1')
+. (Join-Path $PSScriptRoot 'capture-visibility.ps1')
 
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
@@ -30,10 +31,13 @@ using System.Runtime.InteropServices;
 public static class ResumeCaptureDpi {
     [DllImport("user32.dll")]
     public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+    [DllImport("user32.dll")]
+    public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr value);
 }
 "@
 
 [void][ResumeCaptureDpi]::SetProcessDpiAwarenessContext([IntPtr](-4))
+[void][ResumeCaptureDpi]::SetThreadDpiAwarenessContext([IntPtr](-4))
 
 if ([string]::IsNullOrWhiteSpace($PythonPath)) {
     $bundledPython = Join-Path $PSScriptRoot "..\runtime\win-x64\python\python.exe"
@@ -297,9 +301,6 @@ function Save-Screenshot([string]$Path, $Geometry) {
     $bitmap = New-Object System.Drawing.Bitmap($Geometry.width, $Geometry.height)
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
     try {
-        for($attempt=0;$attempt -lt 2;$attempt++){
-          Request-BossForeground
-          try {
            Invoke-CaptureGuard {
             $context=Get-ResumeScrollContext
             if(!$context.present){throw $context.reason}
@@ -307,7 +308,7 @@ function Save-Screenshot([string]$Path, $Geometry) {
             foreach($key in @('left','top','width','height')){
                 if($current[$key] -ne $Geometry[$key]){throw 'resume_capture_geometry_changed'}
             }
-            Assert-BossForeground
+            Assert-BossCaptureVisible $WindowHandle $Geometry
             $graphics.CopyFromScreen(
             $Geometry.left,
             $Geometry.top,
@@ -316,15 +317,13 @@ function Save-Screenshot([string]$Path, $Geometry) {
             $bitmap.Size,
             [System.Drawing.CopyPixelOperation]::SourceCopy
         )
-            Assert-BossForeground
+            Assert-BossCaptureVisible $WindowHandle $Geometry
+            $after=Get-CaptureGeometry (Get-ResumeScrollContext)
+            foreach($key in @('left','top','width','height')){
+                if($after[$key] -ne $Geometry[$key]){throw 'resume_capture_geometry_changed'}
+            }
             $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
            }
-           break
-          } catch {
-           if($_.Exception.Message -notmatch 'bound_codex_iab_not_foreground' -or $attempt -eq 1){throw}
-           Request-BossForeground
-          }
-        }
     }
     finally {
         $graphics.Dispose()
@@ -332,7 +331,6 @@ function Save-Screenshot([string]$Path, $Geometry) {
     }
 }
 
-Request-BossForeground
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 $startedAt = Get-Date
 $top = Set-ResumeScrollPercent 0

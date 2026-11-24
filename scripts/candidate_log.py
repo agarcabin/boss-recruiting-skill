@@ -30,6 +30,7 @@ import fast_assessment
 import hit_summary
 import recruiting_rules
 import run_safety
+import resume_archive
 from report_paths import profile_identity, report_filename
 
 
@@ -446,7 +447,9 @@ def record(db, args, payload=None):
         resume_diagnostics.record(db,args.run,payload['candidate_id'],'电子简历读取/保存',save_failure_note)
     if scores["resume_evidence"]:
         try:
-            resume_paths = archive_resume_files(args.output_root,payload["started_at"],str(payload["candidate_name"]).strip(),digest,scores["resume_evidence"])
+            sent = db.execute('SELECT status FROM candidates WHERE run_id=? AND candidate_hash=?', (args.run,digest)).fetchone()
+            resume_paths = archive_resume_files(args.output_root,payload["started_at"],str(payload["candidate_name"]).strip(),digest,scores["resume_evidence"],
+                                                resume_archive.category(result, sent['status'] if sent else 'assessed'))
             payload["resume_evidence"] = dict(image=resume_paths[0],ocr_text=resume_paths[1],ocr_json=resume_paths[2])
         except (ValueError,OSError) as exc:
             warnings.append('简历归档待补：'+str(exc))
@@ -557,6 +560,11 @@ def sync(db, args):
     path = None
     warnings = []
     try:
+        archived = db.execute('SELECT * FROM assessments WHERE run_id=? AND candidate_hash=?', (args.run,digest)).fetchone()
+        resume_archive.reclassify(db, archived, daily_dir(args.output_root, row['started_at']))
+    except (OSError, ValueError) as exc:
+        warnings.append('简历图片分类待补：' + str(exc))
+    try:
         path = workbook(db, args.output_root, row["started_at"], profile_path=run["profile_path"])
         report_batch.mark_written(db,args.run,digest)
     except (OSError, ValueError) as exc:
@@ -631,6 +639,7 @@ def archive_resume_files(
     candidate_name: str,
     digest: str,
     evidence: dict,
+    category: str = '未招呼简历',
 ) -> tuple[str, str, str | None]:
     image = Path(str(evidence.get("image", "")))
     ocr_text = Path(str(evidence.get("ocr_text", "")))
@@ -653,7 +662,7 @@ def archive_resume_files(
             raise ValueError("resume_ocr_json_invalid") from exc
 
     folder = daily_dir(root, started_at)
-    image_folder = folder / "简历图片"
+    image_folder = resume_archive.image_folder(folder, category)
     ocr_folder = folder / "简历OCR"
     image_folder.mkdir(parents=True, exist_ok=True)
     ocr_folder.mkdir(parents=True, exist_ok=True)
@@ -685,6 +694,7 @@ def archive_resume(db, args):
             "ocr_text": args.ocr_text,
             "ocr_json": args.ocr_json,
         },
+        resume_archive.category(json.loads(row['eligibility_json'] or '{}'), row['send_status']),
     )
     db.execute("""UPDATE assessments SET resume_image_path=?,resume_ocr_text_path=?,
         resume_ocr_json_path=?,resume_archive_status='saved',resume_archive_note='',

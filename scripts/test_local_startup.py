@@ -13,6 +13,9 @@ import local_catalog
 import project_registry
 import quick_start
 import workspace_paths
+import skill_update
+import sys
+from zipfile import ZipFile
 
 
 TEMPLATE = (Path(__file__).resolve().parents[1]/'docs/HR-JOB-TEMPLATE.md').read_text(encoding='utf-8')
@@ -42,6 +45,34 @@ class LocalStartupTests(unittest.TestCase):
 
     def plan(self, prompt):
         return quick_start.prepare(prompt,self.db)
+
+    def test_local_install_registers_service_using_root_keyword(self):
+        archive = self.root/'release.zip'
+        with ZipFile(archive, 'w') as package:
+            package.writestr(skill_update.MANIFEST, json.dumps(dict(version='1.5.4-beta')))
+        signature = self.root/'release.zip.sig'
+        signature.write_text('{}')
+        args = ['skill_update.py','install-local','--root',str(self.root),
+                '--archive',str(archive),'--signature',str(signature)]
+        with patch.object(sys,'argv',args), patch('skill_update.verify_archive'), \
+                patch('skill_update.unpack',return_value={}), patch('skill_update.install',return_value=self.root/'backup'), \
+                patch('skill_update.installed_version',return_value='1.5.4-beta'), \
+                patch('mcp_config.ensure',return_value=dict(state='existing')) as ensure, contextlib.redirect_stdout(io.StringIO()):
+            skill_update.main()
+        ensure.assert_called_once_with(root=self.root)
+
+    def test_online_update_registers_service_using_root_keyword(self):
+        data=b'signed package'
+        release=dict(state='update_available',latest_version='1.5.4-beta',repository='example/repo',
+                     current_version='1.5.3',release_url='https://example.test/release')
+        with patch('skill_update.check',return_value=release), patch('skill_update.assert_idle'), \
+                patch('skill_update.download',return_value=(data,skill_update.digest(data))), \
+                patch('skill_update.unpack',return_value={}), patch('skill_update.install',return_value=self.root/'backup'), \
+                patch('skill_update.installed_version',side_effect=['1.5.3','1.5.4-beta']), \
+                patch('mcp_config.ensure',return_value=dict(state='existing')) as ensure:
+            result=skill_update.update(self.root)
+        self.assertEqual(result['state'],'updated')
+        ensure.assert_called_once_with(root=self.root)
 
     def test_each_entry_reads_added_renamed_and_removed_files(self):
         self.assertEqual(self.plan('帮我打仓管50个')['state'],'menu')

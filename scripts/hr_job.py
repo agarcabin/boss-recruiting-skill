@@ -23,6 +23,10 @@ SETTING_ALIASES = {
 OVERALL_REVIEW = '减分至合格线后AI整体复盘'
 PASS_REVIEW = '过及格线就进行AI整体复盘'
 LOCATION_FILTER = '偏好地点筛选'
+INTENT_FILTER = '求职意愿筛选'
+ANALYZER_ABSENT_POLICY = '无牛人分析器处理'
+COMMUNICATION_BOSS_FILTER = '沟通Boss门槛'
+COMMUNICATION_BOSS_UNKNOWN = '沟通Boss未知处理'
 TEXT_SECTIONS = ('AI整体复盘规则', '偏好地点筛选')
 
 
@@ -142,7 +146,9 @@ def parse(text):
     for line in clean('\n'.join(sections[HEADINGS[2]].get(None, []))).splitlines():
         match = re.fullmatch(r'(.+?)\s*[：:]\s*(.*)', line)
         label = SETTING_ALIASES.get(match[1], match[1]) if match else None
-        if not match or label not in (*SETTINGS, OVERALL_REVIEW, PASS_REVIEW, LOCATION_FILTER) or label in settings:
+        if not match or label not in (*SETTINGS, OVERALL_REVIEW, PASS_REVIEW, LOCATION_FILTER,
+                                      INTENT_FILTER, ANALYZER_ABSENT_POLICY,
+                                      COMMUNICATION_BOSS_FILTER, COMMUNICATION_BOSS_UNKNOWN) or label in settings:
             raise ConfigError('其他配置名称与模板不一致，或重复填写')
         settings[label] = match[2]
     settings.setdefault(SETTINGS[0], '30 秒')
@@ -151,7 +157,15 @@ def parse(text):
     settings.setdefault(PASS_REVIEW, '关')
     # Missing in old documents/snapshots means the pre-switch behavior remains.
     settings.setdefault(LOCATION_FILTER, '开')
-    if set(settings) != set(SETTINGS) | {OVERALL_REVIEW, PASS_REVIEW, LOCATION_FILTER}:
+    settings.setdefault(INTENT_FILTER, '关')
+    settings.setdefault(ANALYZER_ABSENT_POLICY, '符合')
+    settings.setdefault(COMMUNICATION_BOSS_FILTER, '0%')
+    settings.setdefault(COMMUNICATION_BOSS_UNKNOWN, '符合')
+    if set(settings) != set(SETTINGS) | {
+        OVERALL_REVIEW, PASS_REVIEW, LOCATION_FILTER,
+        INTENT_FILTER, ANALYZER_ABSENT_POLICY,
+        COMMUNICATION_BOSS_FILTER, COMMUNICATION_BOSS_UNKNOWN,
+    }:
         raise ConfigError('请填写其他配置中的设置项')
     if settings[SETTINGS[3]] not in ('开', '关'):
         raise ConfigError('三句招呼请填写“开”或“关”')
@@ -171,6 +185,25 @@ def parse(text):
     config['ai_total_review'] = settings[SETTINGS[4]] == '开'
     config['overall_review_on_pass'] = settings[PASS_REVIEW] == '开'
     config['preferred_location_filter_enabled'] = settings[LOCATION_FILTER] == '开'
+    config['intent_filter_enabled'] = settings[INTENT_FILTER] != '关'
+    config['intent_preferences'] = words(settings[INTENT_FILTER]) if config['intent_filter_enabled'] else []
+    if config['intent_filter_enabled'] and any(value not in ('较强', '强') for value in config['intent_preferences']):
+        raise ConfigError('求职意愿筛选只支持“较强”和“强”')
+    if settings[ANALYZER_ABSENT_POLICY] not in ('符合', '放弃'):
+        raise ConfigError('无牛人分析器处理请填写“符合”或“放弃”')
+    config['analyzer_absent_policy'] = 'pass' if settings[ANALYZER_ABSENT_POLICY] == '符合' else 'skip'
+    rate_value = re.sub(r'\s+', '', settings[COMMUNICATION_BOSS_FILTER].strip())
+    config['communication_boss_filter_enabled'] = rate_value not in ('关', '0', '0%', '0％', '')
+    if config['communication_boss_filter_enabled']:
+        rate_match = re.fullmatch(r'(\d{1,3}(?:\.\d+)?)\s*(?:%|％)?', rate_value)
+        if not rate_match or not 0 <= float(rate_match[1]) <= 100:
+            raise ConfigError('沟通Boss门槛请填写“关”或 0–100 的百分位，例如 90')
+        config['communication_boss_minimum'] = float(rate_match[1])
+    else:
+        config['communication_boss_minimum'] = 0.0
+    if settings[COMMUNICATION_BOSS_UNKNOWN] not in ('符合', '放弃'):
+        raise ConfigError('沟通Boss未知处理请填写“符合”或“放弃”')
+    config['communication_boss_unknown_policy'] = 'pass' if settings[COMMUNICATION_BOSS_UNKNOWN] == '符合' else 'skip'
     config['overall_review_rules'] = clean('\n'.join(sections.get(TEXT_SECTIONS[0], {}).get(None, [])))
     import preferred_locations
     config['preferred_locations'] = preferred_locations.parse_config(clean('\n'.join(sections.get(TEXT_SECTIONS[1], {}).get(None, []))))
@@ -279,12 +312,52 @@ def assessment(rules, payload):
         if complete and result['positive_eligible'] and not eligible:
             calculated.update(trigger='negative_below_threshold', summary='命中减分词后低于合格线：'+str(scores['score'])+'分；'+summary)
         if rules.get('review_policy_version', 0) >= 151:
-            import preferred_locations
-            place = preferred_locations.evaluate(rules['hr_job_config'], payload)
-            calculated['location_decision'] = place
-            if place['state'] in ('mismatch', 'unknown'):
-                calculated.update(eligible=False, direct_channels=[], trigger='location_'+place['state'],
-                                  summary=place['reason'])
+            import candidate_preferences
+            intent = candidate_preferences.evaluate_intent(
+                rules['hr_job_config'].get('intent_filter_enabled', False),
+                rules['hr_job_config'].get('intent_preferences', []), text)
+            calculated['intent_decision'] = intent
+            rate = candidate_preferences.evaluate_communication_boss(
+                rules['hr_job_config'].get('communication_boss_filter_enabled', False),
+                rules['hr_job_config'].get('communication_boss_minimum', 0),
+                rules['hr_job_config'].get('communication_boss_unknown_policy', 'pass'), text)
+            calculated['communication_boss_decision'] = rate
+            analyzer_absent = not candidate_preferences.analyzer_present(text)
+            analyzer_policy = rules['hr_job_config'].get('analyzer_absent_policy', 'pass')
+            calculated['analyzer_decision'] = dict(
+                state='absent' if analyzer_absent else 'present',
+                policy='pass' if analyzer_absent and analyzer_policy == 'pass' else 'skip' if analyzer_absent else 'normal',
+                reason=('无牛人分析器，按符合处理' if analyzer_absent and analyzer_policy == 'pass'
+                        else '无牛人分析器，按规则放弃' if analyzer_absent else '牛人分析器存在'),
+            )
+            rejected = False
+            if analyzer_absent and analyzer_policy == 'skip':
+                calculated.update(eligible=False, direct_channels=[], trigger='analyzer_absent',
+                                  summary='无牛人分析器，按岗位配置放弃')
+                rejected = True
+            elif intent['state'] in ('mismatch', 'unknown'):
+                calculated.update(eligible=False, direct_channels=[], trigger='intent_'+intent['state'],
+                                  summary=intent['reason'])
+                rejected = True
+            elif rate['state'] in ('mismatch', 'unknown'):
+                calculated.update(eligible=False, direct_channels=[], trigger='communication_boss_'+rate['state'],
+                                  summary=rate['reason'])
+                rejected = True
+            if not rejected:
+                import preferred_locations
+                place = preferred_locations.evaluate(rules['hr_job_config'], payload)
+                calculated['location_decision'] = place
+                if place['state'] in ('mismatch', 'unknown'):
+                    calculated.update(eligible=False, direct_channels=[], trigger='location_'+place['state'],
+                                      summary=place['reason'])
+            if analyzer_absent and analyzer_policy == 'pass' and (
+                    rules['hr_job_config'].get('intent_filter_enabled')
+                    or rules['hr_job_config'].get('communication_boss_filter_enabled')):
+                calculated['summary'] = '无牛人分析器（按符合处理）；' + str(calculated.get('summary', ''))
         import overall_review
-        calculated = overall_review.apply(rules, payload, calculated)
+        if calculated.get('trigger') not in (
+                'intent_mismatch', 'intent_unknown',
+                'communication_boss_mismatch', 'communication_boss_unknown',
+                'location_mismatch', 'location_unknown', 'analyzer_absent'):
+            calculated = overall_review.apply(rules, payload, calculated)
     return calculated

@@ -36,7 +36,10 @@ def raise_if_interrupted(db, run_id, generation, error):
                                      normal=message.get('normal',True if message['state']=='helper_cancelled' else None)) from error
     detail = str(error) + output
     if 'bound_codex_iab_not_foreground' in detail:
-        raise CaptureInterrupted('BOSS窗口离开前台，截图采集已暂停；返回本聊天后回复继续。',foreground_required=True) from error
+        raise CaptureInterrupted('当前操作需要键盘或鼠标焦点；请手动返回 BOSS 窗口后回复继续。',foreground_required=True) from error
+    if any(code in detail for code in ('capture_window_not_visible','capture_region_occluded',
+            'capture_region_outside_monitor','capture_region_outside_window','capture_window_not_in_visible_zorder')):
+        raise CaptureInterrupted('简历截图区域被遮挡或不可见，采集已暂停；请露出窗口或切到副屏后回复继续。',normal=True) from error
     if 'resume_capture_geometry_changed' in detail:
         raise CaptureInterrupted('截图区域已改变，采集已暂停；保持窗口布局后回复继续。',normal=True) from error
     if 'helper_cancelled' in detail:

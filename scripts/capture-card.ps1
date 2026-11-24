@@ -6,15 +6,15 @@ $ErrorActionPreference='Stop'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 . (Join-Path $PSScriptRoot 'boss-browser-binding.ps1')
-if(!$NoImage){Request-BossForeground}
+. (Join-Path $PSScriptRoot 'capture-visibility.ps1')
 
 Add-Type -AssemblyName System.Drawing
 Add-Type @'
 using System; using System.Runtime.InteropServices;
-public class CardNative { [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll")] public static extern bool SetProcessDPIAware(); }
+public class CardNative { [DllImport("user32.dll")] public static extern bool SetProcessDPIAware(); [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context); }
 '@
 [void][CardNative]::SetProcessDPIAware()
-if(!$NoImage -and [CardNative]::GetForegroundWindow().ToInt64() -ne $WindowHandle){throw 'boss_window_not_foreground'}
+[void][CardNative]::SetThreadDpiAwarenessContext([IntPtr](-4))
 $root=(Get-BossBrowserRoot $WindowHandle)
 $docCondition=[System.Windows.Automation.AndCondition]::new(
  [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Document),
@@ -73,8 +73,15 @@ $directory=[IO.Path]::GetFullPath($OutputDirectory);[IO.Directory]::CreateDirect
 if(!$NoImage){
  $bitmap=[Drawing.Bitmap]::new([int]$rect.Width,[int]$rect.Height);$graphics=[Drawing.Graphics]::FromImage($bitmap)
  $null=Get-BossBrowserRoot ([long]$WindowHandle)
- Assert-BossForeground
- try {$graphics.CopyFromScreen([int]$rect.X,[int]$rect.Y,0,0,$bitmap.Size);$bitmap.Save((Join-Path $directory 'card.png'),[Drawing.Imaging.ImageFormat]::Png)}finally{$graphics.Dispose();$bitmap.Dispose()}
+ $geometry=@{left=[int]$rect.X;top=[int]$rect.Y;width=$bitmap.Width;height=$bitmap.Height}
+ try {
+  Assert-BossCaptureVisible $WindowHandle $geometry
+  $graphics.CopyFromScreen([int]$rect.X,[int]$rect.Y,0,0,$bitmap.Size)
+  Assert-BossCaptureVisible $WindowHandle $geometry
+  $after=$card.Current.BoundingRectangle
+  if($after -ne $rect){throw 'resume_capture_geometry_changed'}
+  $bitmap.Save((Join-Path $directory 'card.png'),[Drawing.Imaging.ImageFormat]::Png)
+ }finally{$graphics.Dispose();$bitmap.Dispose()}
 }
 $observation.image_saved=!$NoImage
 $observation | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $directory 'card.uia.json') -Encoding UTF8

@@ -24,6 +24,12 @@ function Assert-BossBrowserTarget($Element,[long]$Handle=0) {
  $cursor=$Element;$walker=[System.Windows.Automation.TreeWalker]::RawViewWalker
  for($i=0;$cursor -and $i -lt 100;$i++){
   if(($cursor.GetRuntimeId() -join ',') -eq ($bound.GetRuntimeId() -join ',')){return}
+   # 简历/推荐可能渲染为同一窗口内的独立 BOSS 文档，仍属于本轮绑定范围。
+   if($cursor.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document){
+    $value=$null
+    if($cursor.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern,[ref]$value) -and
+     $value.Current.Value -match '^https://www\.zhipin\.com(?:/|$)'){return}
+   }
   $cursor=$walker.GetParent($cursor)
  }
  throw 'target_outside_bound_codex_iab'
@@ -69,38 +75,6 @@ function Wait-BossForeground([int]$TimeoutMs=10000) {
 }
 
 function Request-BossForeground {
- # Only explicit screen/mouse/keyboard operations call this function.
- # Resolve the exact bound host/chat/document before changing window order.
- $null=Get-BossBrowserRoot -AllowOffscreen
- $b=Get-Content -LiteralPath $env:BOSS_BROWSER_BINDING -Raw -Encoding UTF8|ConvertFrom-Json
- if(!('BossBrowserActivationNative' -as [type])){
-  Add-Type 'using System;using System.Runtime.InteropServices;public static class BossBrowserActivationNative{[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();[DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);[DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h,int n);[DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h,IntPtr p);[DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();[DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a,uint b,bool attach);}'
- }
- $handle=[IntPtr][long]$b.hwnd
- if([BossBrowserActivationNative]::IsIconic($handle)){
-  [void][BossBrowserActivationNative]::ShowWindowAsync($handle,9)
-  Start-Sleep -Milliseconds 200
- }
- if([BossBrowserActivationNative]::GetForegroundWindow() -ne $handle){
-  [void][BossBrowserActivationNative]::BringWindowToTop($handle)
-  [void][BossBrowserActivationNative]::SetForegroundWindow($handle)
- }
- if([BossBrowserActivationNative]::GetForegroundWindow() -ne $handle){
-  # Background workers may be denied the initial activation by Windows.
-  # Temporarily join the input queues, without sending keys or mouse clicks.
-  $currentThread=[BossBrowserActivationNative]::GetCurrentThreadId()
-  $foregroundThread=[BossBrowserActivationNative]::GetWindowThreadProcessId([BossBrowserActivationNative]::GetForegroundWindow(),[IntPtr]::Zero)
-  $targetThread=[BossBrowserActivationNative]::GetWindowThreadProcessId($handle,[IntPtr]::Zero)
-  $attached=[Collections.Generic.List[uint32]]::new()
-  try {
-   foreach($thread in @($foregroundThread,$targetThread)|Select-Object -Unique){
-    if($thread -and $thread -ne $currentThread -and [BossBrowserActivationNative]::AttachThreadInput($currentThread,$thread,$true)){$attached.Add($thread)}
-   }
-   [void][BossBrowserActivationNative]::BringWindowToTop($handle)
-   [void][BossBrowserActivationNative]::SetForegroundWindow($handle)
-  } finally {
-   foreach($thread in $attached){[void][BossBrowserActivationNative]::AttachThreadInput($currentThread,$thread,$false)}
-  }
- }
- Wait-BossForeground -TimeoutMs 3000
+ # Legacy entry point now only checks focus. Never activate or restore a window.
+ Assert-BossForeground
 }

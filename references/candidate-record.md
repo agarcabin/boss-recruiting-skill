@@ -1,5 +1,7 @@
 # 评估记录和日报
 
+1.5.4-beta 起，“运行记录/简历图片”分为“已招呼简历”“AI复盘捞回简历”“AI复盘过滤简历”“未招呼简历”，以已校验的AI结论及平台发送状态分类。原图、标色图和说明一起移动，账本与Excel同步更新链接；细则见 [resume-capture-ocr.md](resume-capture-ocr.md)。同事重复在截图前跳过，不单设图片目录。
+
 record共用字段：candidate_id、candidate_name、started_at（含时区）、electronic_resume_enabled、overall_score、hard_requirements、decision(greet/skip/review)、pros、cons。结束时间由真实离开动作的finalize-timing补入，不估计。card另含card和card_evidence；resume另含electronic、coworker_progress，resume_evidence仅在实际保存后提供。
 
 词表、分数和资格通过同一 recruiting_rules.evaluate 在record及reserve核对；新建项目的规则保存在project.json.rules。默认条件不得套用其他项目。direct_rule按项目快照记录真实命中词和快速分；完整评分未知不编造，薪资/在职和年限字段按实际已读信息填写，扣分交统一代码计算，不能预扣两次。

@@ -353,7 +353,7 @@ def update(root: Path, backups: Path | None = None, database: Path | None = None
         backup = install(root, files, backups or state_dir() / 'updates' / 'backups',database=database)
     try:
         import mcp_config
-        mcp = mcp_config.ensure(root)
+        mcp = mcp_config.ensure(root=root)
     except Exception as exc:
         mcp = dict(state='skipped', reason=str(exc)[:300])
     return dict(state='updated', previous_version=result['current_version'], version=installed_version(root),
@@ -390,7 +390,7 @@ def main() -> None:
                 backup=install(args.root,files,state_dir()/'updates/backups',runtime_source=args.runtime_source)
             try:
                 import mcp_config
-                mcp=mcp_config.ensure(args.root)
+                mcp=mcp_config.ensure(root=args.root)
             except Exception as exc:
                 mcp=dict(state='skipped',reason=str(exc)[:300])
             result=dict(state='installed',version=installed_version(args.root),backup=str(backup),mcp=mcp)

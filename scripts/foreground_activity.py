@@ -1,15 +1,16 @@
-"""Publish only live operations that need the user's foreground window."""
+"""Publish physical input requirements without activating the user's window."""
 import contextlib
 import os
 import subprocess
 from pathlib import Path
 import uuid
+import focus_guard
 import run_safety
 import powershell_host
 from windows_process import hidden_options,decode_output
 
 
-def activate():
+def require_input_foreground():
     command=powershell_host.command(Path(__file__).with_name('request-boss-foreground.ps1'))
     try:
         subprocess.run(command,check=True,capture_output=True,timeout=12,
@@ -18,21 +19,17 @@ def activate():
         detail=decode_output(exc.stderr or exc.stdout) or str(exc)
         if 'bound_codex_iab_not_foreground' in detail:
             import capture_control
-            raise capture_control.CaptureInterrupted('无法将本聊天的BOSS窗口前置，请返回后回复继续。',foreground_required=True) from exc
+            raise capture_control.CaptureInterrupted('当前操作需要键盘或鼠标，请手动返回 BOSS 窗口后继续；程序不会抢焦点。',foreground_required=True) from exc
         import capture_control
-        raise capture_control.CaptureInterrupted('无法定位或前置本聊天的BOSS窗口：'+detail[-1800:]) from exc
+        raise capture_control.CaptureInterrupted('无法核验本聊天的 BOSS 窗口：'+detail[-1800:]) from exc
     except subprocess.TimeoutExpired as exc:
         import capture_control
-        raise capture_control.CaptureInterrupted('前置BOSS窗口超时，请返回本聊天后回复继续。',foreground_required=True) from exc
+        raise capture_control.CaptureInterrupted('核验 BOSS 输入焦点超时，请返回本聊天后回复继续。',foreground_required=True) from exc
 
 
 def requirement(command):
     names={Path(str(arg)).name.lower() for arg in command}
     args=[str(arg).lower() for arg in command]
-    if 'resume_capture.ps1' in names:
-        return '正在采集简历截图'
-    if 'capture-card.ps1' in names and '-noimage' not in args:
-        return '正在采集卡片截图'
     if names & {'move-click.ps1','idle_mouse.py'}:
         return '正在进行鼠标操作'
     if 'guarded-uia-action.ps1' in names and '-action' in args:
@@ -44,6 +41,12 @@ def requirement(command):
 
 @contextlib.contextmanager
 def track(db, run_id, command):
+    if focus_guard.requires_guard(command):
+        try:
+            focus_guard.wait_for_safe(timeout_seconds=30)
+        except focus_guard.UserTyping as exc:
+            import capture_control
+            raise capture_control.CaptureInterrupted(str(exc), normal=True) from exc
     label=requirement(command)
     if not label:
         yield
@@ -54,7 +57,7 @@ def track(db, run_id, command):
     db.execute('INSERT INTO foreground_activity VALUES (?,?,?,?,?)',
                (token,run_id,os.getpid(),run_safety.process_birth(os.getpid()),label))
     try:
-        activate()
+        require_input_foreground()
         yield
     finally:
         db.execute('DELETE FROM foreground_activity WHERE token=?',(token,))

@@ -7,6 +7,7 @@ from argparse import Namespace
 import ledger,candidate_log,candidate_checks,coworker_progress,recruiting_rules
 import fast_assessment,report_batch,run_safety
 import capture_control
+import foreground_lock
 import ui_features,short_view_wait,greeting_rate
 from workflow_paths import workflow_dir
 
@@ -92,6 +93,7 @@ class Runner:
 
     def status(self,state=None):
         page_job=self.db.execute('SELECT value FROM settings WHERE key=?',('boss_page_job/'+self.run,)).fetchone()
+        lock=self.db.execute('SELECT value FROM settings WHERE key=?',('foreground_lock/state/'+self.run,)).fetchone()
         if state is None:
             control=ledger.control_state(self.db,self.run)
             cached=self.data.get('scheduler_state',self.phase)
@@ -101,7 +103,8 @@ class Runner:
                     response_file=self.data.get('response_file'),visits=self.data.get('visits',0),
                     warnings=self.data.get('warnings',[]),error=self.data.get('error'),
                     rate_limit=self.data.get('rate_limit'),short_view_wait=self.data.get('short_view_wait'),notice_wait=self.data.get('notice_wait'),
-                    last_result=self.data.get('last_result'),exports=self.data.get('exports',[]))
+                    last_result=self.data.get('last_result'),exports=self.data.get('exports',[]),
+                    foreground_lock=json.loads(lock[0]) if lock else None)
 
     def handoff(self,kind,payload):
         # Filter notices precede the creation of a candidate visit.
@@ -601,6 +604,11 @@ def main():
     args=p.parse_args()
     if args.browser_binding:os.environ['BOSS_BROWSER_BINDING']=str(args.browser_binding.resolve())
     if not args.status and not os.environ.get('BOSS_BROWSER_BINDING'):p.error('codex_iab_binding_required; open BOSS with open_in_codex and bind-boss-browser.ps1')
+    if not args.status:
+        import display_switch
+        with contextlib.closing(ledger.connect(args.db)) as db:
+            ledger.run_row(db,args.run)
+            display_switch.remember_binding(db,args.run,os.environ['BOSS_BROWSER_BINDING'])
     if args.launch:
         from launch_progress import launch_process
         import sys
@@ -625,6 +633,17 @@ def main():
                 if alive:raise ValueError('runner_already_running')
             db.execute('INSERT OR REPLACE INTO workflow_owner VALUES (?,?,?)',(args.run,os.getpid(),run_safety.process_birth(os.getpid())))
         try:
+            try:
+                applied=foreground_lock.apply(db,args.run)
+                db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
+                           ('foreground_lock/state/'+args.run,
+                            json.dumps(dict(apply=applied),ensure_ascii=False)))
+                db.commit()
+            except Exception as exc:
+                db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
+                           ('foreground_lock/state/'+args.run,
+                            json.dumps(dict(state='failed',error=str(exc)),ensure_ascii=False)))
+                db.commit()
             page_retries=0
             while True:
                 result=runner.advance()

@@ -215,7 +215,7 @@ Test.
         return "UIA 查询、受控点击与简历采集脚本语法通过"
 
     checks.append(check("UIA 查询与点击脚本", uia_tools_test))
-    checks.append(check("Codex 最大化", lambda: __import__("progress_window").ensure_codex_maximized()[1] or (_ for _ in ()).throw(RuntimeError("Codex 窗口未最大化"))))
+    checks.append(check("Codex 窗口（只读）", lambda: bool(__import__("progress_window").find_codex_window()) or (_ for _ in ()).throw(RuntimeError("未检测到可见的 Codex 窗口；请手动打开，测试不会激活或最大化窗口"))))
 
     def idle_mouse_test():
         result = subprocess.run([sys.executable, str(idle_mouse), "--x", "120", "--y", "120", "--radius", "20",

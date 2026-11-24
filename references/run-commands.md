@@ -4,6 +4,8 @@
 
 workflow_runner.py --status读取检查点；运行内暂停/继续/结束由统一控制器处理。调试单步命令及参数使用ledger.py、candidate_log.py、boss_safe_actions.py、stop_controller.py的--help，不能把调试入口作为绕过同事/规则/限速的途径。
 
+AI 复盘交接优先用 recruiting MCP：`recruiting_wait` 长轮询（30–60 秒一轮），`recruiting_respond` 提交回答；MCP 不可用时退回 `workflow_handoff.py` 与响应文件。MCP 不能唤醒空闲聊天。
+
 记录、发送、核验、收藏、计时与导出由主执行器续接，不因聊天重试而重复打开或发消息。停止前先持久请求停止，再补写相关唯一日表；--output-root不能另造已登记的同岗日表。
 
 

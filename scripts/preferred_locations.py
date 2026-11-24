@@ -14,6 +14,70 @@ def parse_config(text):
     return list(dict.fromkeys(values))
 
 
+_PREFERENCE_LABEL = (
+    r'偏\s*好\s*(?:工\s*作\s*)?地\s*点(?!\s*筛\s*选)'
+)
+_ANALYZER_PREFERENCE = re.compile(
+    _PREFERENCE_LABEL
+    + r'\s*[：:]?\s*'
+    r'(?!(?:\s*查\s*看\s*全\s*部|\s*牛\s*人\s*通\s*常|'
+    r'\s*求\s*职\s*意\s*愿|\s*沟\s*通\s*Boss|'
+    r'\s*受\s*欢\s*迎\s*程\s*度|\s*更\s*喜\s*欢))'
+    r'([\s\S]{1,160}?)'
+    r'(?=\s*(?:。|；|;|查\s*看\s*全\s*部|牛\s*人\s*通\s*常|'
+    r'求\s*职\s*意\s*愿|沟\s*通\s*Boss|受\s*欢\s*迎\s*程\s*度|\Z))'
+)
+
+
+def _ocr_value(value):
+    """Join OCR line wraps while preserving boundaries between places."""
+    lines = [
+        re.sub(r'\s+', '', line)
+        for line in str(value or '').replace('\r', '\n').split('\n')
+        if line.strip()
+    ]
+    combined = ''
+    for line in lines:
+        if combined and re.search(r'[省市区县旗镇]$', combined):
+            combined += '、' + line
+        else:
+            combined += line
+    combined = re.sub(
+        r'^(?:为|是|包括|包含|可接受|可以接受)[：:]?', '', combined
+    )
+    return combined.strip(' ：:，,、-—')
+
+
+def from_resume_ocr(text):
+    """Recover the analyzer's explicit preference from saved resume OCR.
+
+    This is a fallback for pages where the analyzer panel is visible in the
+    captured resume but not exposed through a stable UIA panel header. Only
+    the explicit analyzer label is accepted; no residence or expectation
+    location is inferred.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return dict(state='unknown', reason='resume_ocr_unavailable',
+                    source='resume_ocr_analyzer_preference')
+    values = []
+    for match in _ANALYZER_PREFERENCE.finditer(text):
+        value = _ocr_value(match.group(1))
+        if value:
+            values.append(value)
+    values = list(dict.fromkeys(values))
+    if not values:
+        return dict(state='unknown',
+                    reason='resume_ocr_analyzer_preference_not_found',
+                    source='resume_ocr_analyzer_preference')
+    if len(values) != 1:
+        return dict(state='unknown',
+                    reason='resume_ocr_analyzer_preference_ambiguous',
+                    values=values,
+                    source='resume_ocr_analyzer_preference')
+    return dict(state='present', text=values[0],
+                source='resume_ocr_analyzer_preference')
+
+
 def normalize(value):
     value = re.sub(r'[\s·/\-—]+', '', value)
     return re.sub(r'^(?:浙江|江苏|福建|广东)(?:省)?', '', value)
@@ -115,6 +179,19 @@ def evaluate(config, facts):
         except (OSError, ValueError, UnicodeError):
             return dict(state='unknown', reason='偏好地点采集证据不可用，待重新读取')
     state = observed.get('state', 'unknown')
+    if state != 'present':
+        evidence = facts.get('resume_evidence') or {}
+        ocr_path = evidence.get('ocr_text')
+        if isinstance(ocr_path, str) and ocr_path:
+            try:
+                ocr_text = Path(ocr_path).read_text(encoding='utf-8-sig')
+            except (OSError, UnicodeError):
+                ocr_text = ''
+            fallback = from_resume_ocr(ocr_text)
+            if fallback.get('state') == 'present':
+                fallback['uia_observation'] = observed
+                observed = fallback
+                state = 'present'
     if state == 'absent':return dict(state='absent', reason='牛人分析器未提供偏好地点，默认通过')
     if state != 'present' or not isinstance(observed.get('text'), str) or not observed['text'].strip():
         return dict(state='absent', reason='未读取到牛人分析器偏好地点，默认通过')

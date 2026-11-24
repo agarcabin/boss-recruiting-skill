@@ -80,7 +80,7 @@ class NoticeWaitTests(unittest.TestCase):
     def test_overlay_reasserts_topmost_without_activating(self):
         import progress_window
         status, buttons = Mock(), Mock()
-        with patch.object(progress_window, '_top_level_handle', side_effect=[11, 22]), patch.object(progress_window, '_get_window_style', return_value=0), patch.object(progress_window, '_set_window_style'), patch.object(progress_window.ctypes.windll.user32, 'SetWindowPos') as position:
+        with patch.object(progress_window.ctypes.windll.user32, 'SetLayeredWindowAttributes',return_value=True), patch.object(progress_window, 'pin_overlay_to_primary'), patch.object(progress_window, '_top_level_handle', side_effect=[11, 22]), patch.object(progress_window, '_get_window_style', return_value=0), patch.object(progress_window, '_set_window_style'), patch.object(progress_window.ctypes.windll.user32, 'SetWindowPos') as position:
             progress_window.configure_overlay_windows(status, buttons)
         self.assertEqual([(c.args[0].value, c.args[1].value) for c in position.call_args_list], [(11, progress_window.wintypes.HWND(-1).value), (22, progress_window.wintypes.HWND(-1).value)])
         for call in position.call_args_list:

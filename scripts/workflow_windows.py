@@ -1,6 +1,6 @@
 """Windows UIA adapter for the continuous scheduler; no CUA/DOM or model API."""
 from pathlib import Path
-import hashlib,json,subprocess,time,uuid
+import hashlib,json,os,subprocess,time,uuid
 import ledger,powershell_host,safe_action,ui_features,capture_resume,card_observation,fast_assessment,recruiting_rules
 from windows_process import hidden_options
 from workflow_paths import workflow_dir
@@ -60,10 +60,50 @@ class WindowsAdapter:
         try:
             command=powershell_host.command(Path(__file__).with_name('guarded-uia-action.ps1'),'-Target',path,'-Action',action)
             if key:command+=['-Key',key]
-            if getattr(self,'operation_deadline',None) is not None:
-                return safe_action.dispatch(self.db,self.run,None,command,timeout=self.operation_timeout(8))
-            return safe_action.dispatch(self.db,self.run,None,command)
+            try:
+                if getattr(self,'operation_deadline',None) is not None:
+                    result=safe_action.dispatch(self.db,self.run,None,command,timeout=self.operation_timeout(8))
+                else:
+                    result=safe_action.dispatch(self.db,self.run,None,command)
+            except RuntimeError as exc:
+                stale=('target_outside_bound_codex_iab','codex_iab_document_lost_rebind_required',
+                       'stale_boss_browser_target_rebind_required','codex_iab_chat_changed','codex_iab_window_changed')
+                if not any(key in str(exc) for key in stale) or not self._rebind_boss():
+                    raise
+                if getattr(self,'operation_deadline',None) is not None:
+                    result=safe_action.dispatch(self.db,self.run,None,command,timeout=self.operation_timeout(8))
+                else:
+                    result=safe_action.dispatch(self.db,self.run,None,command)
+            receipt={}
+            if isinstance(result,dict):
+                try:receipt=json.loads(result.get('output') or '{}')
+                except (TypeError,ValueError):receipt={}
+            if receipt.get('transport')=='msaa':
+                self.db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)",('msaa_notice/'+self.run,
+                    json.dumps(dict(at=ledger.iso(ledger.now()),msaa_error=receipt.get('msaa_error')),ensure_ascii=False)))
+                self.db.commit()
+            return result
         finally:path.unlink(missing_ok=True)
+
+    def _rebind_boss(self):
+        """Re-bind the same chat/window after Chromium recreates its document."""
+        path=os.environ.get('BOSS_BROWSER_BINDING')
+        if not path or not Path(path).exists():
+            return False
+        try:
+            binding=json.loads(Path(path).read_text(encoding='utf-8-sig'))
+            command=powershell_host.command(Path(__file__).with_name('bind-boss-browser.ps1'),
+                '-WindowHandle',str(binding['hwnd']),'-ChatTitle',binding['chat_title'],'-OutputFile',path)
+            done=subprocess.run(command,capture_output=True,text=True,encoding='utf-8-sig',
+                                errors='replace',timeout=20,**hidden_options())
+            if done.returncode:
+                return False
+            data=json.loads(Path(path).read_text(encoding='utf-8-sig'))
+            data['binding_id']=binding.get('binding_id') or data.get('binding_id')
+            Path(path).write_text(json.dumps(data,ensure_ascii=False),encoding='utf-8')
+            return True
+        except (OSError,ValueError,KeyError,subprocess.SubprocessError):
+            return False
 
     def dismiss_related(self):
         for attempt in range(2):

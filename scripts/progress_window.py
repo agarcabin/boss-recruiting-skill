@@ -23,13 +23,14 @@ from tkinter import messagebox
 
 import ledger
 import daily_metrics
+import display_switch
+from overlay_native import NativeRoot
 from keep_awake import KeepAwake
 from report_paths import report_path
 from report_snapshot import create as report_snapshot
 
 
 CN_TZ = timezone(timedelta(hours=8))
-SW_MAXIMIZE = 3
 SW_HIDE = 0
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 GWL_EXSTYLE = -20
@@ -44,7 +45,7 @@ SWP_NOACTIVATE = 0x0010
 SWP_FRAMECHANGED = 0x0020
 
 STATUS_WIDTH = 710
-BUTTON_WIDTH = 300
+BUTTON_WIDTH = 400
 PANEL_HEIGHT = 80
 PANEL_TOP = 6
 PANEL_ALPHA = 0.78
@@ -57,6 +58,7 @@ BUTTON_BG = "#30404F"
 BUTTON_ACTIVE_BG = "#42576A"
 BUTTON_DISABLED_BG = "#26333E"
 BUTTON_BORDER = "#3C4D5D"
+DISPLAY_BUTTON_COLORS = dict(yellow=('#FACC15','#FDE047'),green=('#22C55E','#4ADE80'))
 SIGNAL_COLORS = dict(green='#4ADE80',yellow='#F6C857',red='#EF6262',gray='#94A3B8')
 
 
@@ -66,7 +68,7 @@ def indicator(data):
     interrupt=data.get('interrupt_status') or ''
     if (state in ('login_required','expired') or
         interrupt.startswith(('failed','not_bound')) or interrupt=='unconfirmed' or
-        data.get('scheduler_state') in ('needs_attention','needs_page') or
+        data.get('scheduler_state') in ('needs_attention','needs_page') or data.get('stage_overdue') or
         data.get('warnings') or data.get('error') and not data.get('foreground_waiting')):
         return 'red','等待人工登录' if state=='login_required' else '运行异常'
     if data.get('foreground_required'):
@@ -171,6 +173,7 @@ def enable_dpi_awareness() -> None:
 
 
 def _top_level_handle(widget: tk.Misc) -> int:
+    if hasattr(widget,'native_hwnd'):return int(widget.native_hwnd)
     hwnd = widget.winfo_id()
     parent = ctypes.windll.user32.GetParent(hwnd)
     return int(parent or hwnd)
@@ -208,16 +211,47 @@ def configure_overlay_windows(status_window: tk.Tk, button_window: tk.Toplevel) 
         return
     status_hwnd = _top_level_handle(status_window)
     status_style = _get_window_style(status_hwnd)
-    _set_window_style(
-        status_hwnd,
-        status_style | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-    )
+    shared = status_hwnd == _top_level_handle(button_window)
+    status_style |= WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+    _set_window_style(status_hwnd, (status_style & ~WS_EX_TRANSPARENT) if shared else (status_style | WS_EX_TRANSPARENT))
+    if shared:
+        if not ctypes.windll.user32.SetLayeredWindowAttributes(wintypes.HWND(status_hwnd),0x030201,round(PANEL_ALPHA*255),3):
+            raise OSError('无法设置悬浮窗透明度。')
+        flags = SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_FRAMECHANGED
+        ctypes.windll.user32.SetWindowPos(wintypes.HWND(status_hwnd), wintypes.HWND(-1), 0, 0, 0, 0, flags)
+        pin_overlay_to_primary(status_window,button_window)
+        return
     button_hwnd = _top_level_handle(button_window)
     button_style = _get_window_style(button_hwnd)
-    _set_window_style(button_hwnd, button_style | WS_EX_LAYERED | WS_EX_TOOLWINDOW)
+    _set_window_style(button_hwnd, button_style | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)
+    # Applying native layered styles before Tk maps the windows requires setting
+    # their alpha/color key explicitly; otherwise Windows may leave them unpainted.
+    for hwnd in (status_hwnd,button_hwnd):
+        if not ctypes.windll.user32.SetLayeredWindowAttributes(wintypes.HWND(hwnd),0x030201,round(PANEL_ALPHA*255),3):
+            raise OSError('无法设置悬浮窗透明度。')
     flags = SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_FRAMECHANGED
     ctypes.windll.user32.SetWindowPos(wintypes.HWND(status_hwnd), wintypes.HWND(-1), 0, 0, 0, 0, flags)
     ctypes.windll.user32.SetWindowPos(wintypes.HWND(button_hwnd), wintypes.HWND(-1), 0, 0, 0, 0, flags)
+    pin_overlay_to_primary(status_window,button_window)
+
+
+def pin_overlay_to_primary(status_window,button_window,native=None):
+    if os.name!='nt':return
+    native=native or display_switch.NativeDisplays()
+    work = display_switch.primary_monitor(native.monitors())['work']
+    shared = _top_level_handle(status_window) == _top_level_handle(button_window)
+    widths = [status_window.winfo_width()] if shared else [status_window.winfo_width(), button_window.winfo_width()]
+    left = work[0] + max(0, (work[2]-work[0]-sum(widths))//2)
+    top = work[1] + PANEL_TOP
+    positions = ((status_window,left),) if shared else ((status_window,left),(button_window,left+widths[0]))
+    for widget, x in positions:
+        hwnd=_top_level_handle(widget)
+        api=native.api
+        rect=wintypes.RECT()
+        if not api.GetWindowRect(wintypes.HWND(hwnd),ctypes.byref(rect)):
+            raise OSError('无法读取悬浮窗位置。')
+        if (rect.left,rect.top)!=(x,top):
+            api.SetWindowPos(wintypes.HWND(hwnd),None,x,top,0,0,SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE)
 
 
 def _window_text(hwnd: int) -> str:
@@ -262,7 +296,7 @@ def find_codex_window() -> int | None:
     def collect(hwnd, _lparam):
         if not ctypes.windll.user32.IsWindowVisible(hwnd):
             return True
-        if _window_process_name(hwnd).lower() != "chatgpt.exe":
+        if _window_process_name(hwnd).lower() not in ("chatgpt.exe","codex.exe"):
             return True
         if "Chrome_WidgetWin" not in _window_class(hwnd):
             return True
@@ -281,13 +315,10 @@ def find_codex_window() -> int | None:
 
 
 def ensure_codex_maximized() -> tuple[bool, bool]:
+    """Legacy read-only probe; never resize or activate the user's Codex window."""
     hwnd = find_codex_window()
     if hwnd is None:
         return False, False
-    if ctypes.windll.user32.IsZoomed(hwnd):
-        return True, True
-    ctypes.windll.user32.ShowWindowAsync(hwnd, SW_MAXIMIZE)
-    time.sleep(0.08)
     return True, bool(ctypes.windll.user32.IsZoomed(hwnd))
 
 
@@ -306,12 +337,32 @@ def snapshot(db: sqlite3.Connection, run_id: str, output_root=None) -> dict:
     average_seconds = round(average_row[0]) if average_row[0] is not None else None
     remaining_minutes,basis=daily_metrics.estimate(run,progress["started"],sent,average_seconds,elapsed)
     daily=daily_metrics.daily_counts(db,run,output_root or workspace_paths.desktop_dir())
+    badge=db.execute("SELECT value FROM settings WHERE key=?",('message_badge/'+run_id,)).fetchone()
+    message_count=0
+    if badge:
+        try:message_count=max(0,int(json.loads(badge[0]).get('count') or 0))
+        except (TypeError,ValueError):message_count=0
     viewing_average_seconds=viewing_average(db,run_id,progress['started'],elapsed)
     step=workflow_detail(db,run_id,state,active,elapsed)
+    fallback=db.execute("SELECT value FROM settings WHERE key=?",('msaa_notice/'+run_id,)).fetchone()
+    if fallback:
+        try:
+            fallback_at=json.loads(fallback[0]).get('at')
+            fallback_age=(ledger.now()-ledger.parse_time(fallback_at)).total_seconds() if fallback_at else None
+        except (ValueError,TypeError):
+            fallback_age=None
+        if fallback_age is not None and 0<=fallback_age<=10:
+            step='正在使用 MSAA 替代 UIA 点击 · '+step
     workflow_payload={}
     has_workflow=db.execute("SELECT 1 FROM sqlite_master WHERE name='workflow_state'").fetchone()
     workflow=db.execute('SELECT phase,payload FROM workflow_state WHERE run_id=?',(run_id,)).fetchone() if has_workflow else None
     if workflow:workflow_payload=json.loads(workflow['payload'])
+    phase_started=workflow_payload.get('phase_started_elapsed')
+    stage_overdue=(state in ('running','draining') and isinstance(phase_started,(int,float))
+                   and elapsed-phase_started>60 and not workflow_payload.get('handoff_kind')
+                   and not workflow_payload.get('foreground_required')
+                   and workflow_payload.get('scheduler_state') not in ('short_view_wait','notice_wait','rate_limited','needs_page','needs_attention'))
+    if stage_overdue:step='单一环节超过60秒，正在等待排查 · '+step
     import foreground_activity
     foreground_label=foreground_activity.current(db,run_id) if state in ('running','draining') else None
     return {"state": state, "elapsed": f"{elapsed // 3600:02d}:{elapsed % 3600 // 60:02d}:{elapsed % 60:02d}",
@@ -319,8 +370,10 @@ def snapshot(db: sqlite3.Connection, run_id: str, output_root=None) -> dict:
             "foreground_waiting":bool(workflow_payload.get('foreground_required')),
             "foreground_label":foreground_label,"error":friendly_error(workflow_payload.get('error')),
             "warnings":workflow_payload.get('warnings',[]),"scheduler_state":workflow_payload.get('scheduler_state'),
+            "stage_overdue":stage_overdue,
             "notice_wait":workflow_payload.get('notice_wait'),
             "current_step": step, "drain_reason":drain_reason,
+            "message_count": message_count,
             "current": active["ordinal"] if active else None, "started": progress["started"],
             "completed": progress["completed"], "electronic": progress["electronic"],
             "sent": sent, "target": run["target"], "average_seconds": average_seconds,
@@ -386,24 +439,43 @@ def metrics_text(data):
 def button_geometry(scale=1.0):
     height=round(PANEL_HEIGHT/scale)
     button_h=round(64/scale)
-    return dict(y=(height-button_h)//2,height=button_h,gap=round(8/scale),x=round(8/scale),widths=[round(v/scale) for v in (80,80,108)])
+    return dict(y=(height-button_h)//2,height=button_h,gap=round(8/scale),x=round(8/scale),widths=[round(v/scale) for v in (80,80,108,88)])
+
+
+def create_overlay_root():
+    if os.name=='nt':return NativeRoot()
+    root=tk.Tk()
+    root.withdraw()
+    return root
+
+
+def dialog_parent(root):
+    return None if hasattr(root,'native_hwnd') else root
 
 
 class ProgressWindow:
     def __init__(self, root: tk.Tk, db_path: Path, run_id: str, output_root: Path, demo: bool = False):
         self.root, self.db_path, self.run_id, self.output_root = root, db_path, run_id, output_root
+        root.withdraw()
         self.demo = demo
         self.wake = KeepAwake()
         self.timer: str | None = None
         self.detail_metrics_key: tuple | None = None
         self.pause_enabled = False
+        self.switching_display = False
+        self.display_result = None
+        self.display_notice = ''
+        self.display_notice_until = 0
+        self.display_button=dict(label='主屏',color='yellow')
+        self.last_message_poll = 0.0
+        self.message_poll_busy = False
         logical_screen_width = max(1, root.winfo_screenwidth())
         physical_screen_width = ctypes.windll.user32.GetSystemMetrics(0) if os.name == "nt" else logical_screen_width
-        self.ui_scale = max(1.0, physical_screen_width / logical_screen_width)
+        self.ui_scale = max(1.0, physical_screen_width / logical_screen_width,
+                            (STATUS_WIDTH+BUTTON_WIDTH)/max(1,logical_screen_width))
         root.title("自动打招呼 · 演示窗口" if demo else "自动打招呼 · 运行进度")
         root.overrideredirect(True)
         root.configure(bg=TRANSPARENT_KEY)
-        root.attributes("-topmost", True)
         root.attributes("-alpha", PANEL_ALPHA)
         try:
             root.attributes("-transparentcolor", TRANSPARENT_KEY)
@@ -416,39 +488,28 @@ class ProgressWindow:
         panel_top = round(PANEL_TOP / self.ui_scale)
         total_width = status_width + button_width
         left = max(0, (root.winfo_screenwidth() - total_width) // 2)
-        root.geometry(f"{status_width}x{panel_height}+{left}+{panel_top}")
+        root.geometry(f"{total_width}x{panel_height}+{left}+{panel_top}")
+        self.button_window = root
 
-        self.button_window = tk.Toplevel(root)
-        self.button_window.overrideredirect(True)
-        self.button_window.configure(bg=TRANSPARENT_KEY)
-        self.button_window.attributes("-topmost", True)
-        self.button_window.attributes("-alpha", PANEL_ALPHA)
-        try:
-            self.button_window.attributes("-transparentcolor", TRANSPARENT_KEY)
-        except tk.TclError:
-            pass
-        self.button_window.geometry(
-            f"{button_width}x{panel_height}+{left + status_width}+{panel_top}"
-        )
-
-        self.status_canvas = tk.Canvas(
-            root, width=status_width, height=panel_height,
+        self.status_canvas = (root.make_canvas if hasattr(root,'native_hwnd') else lambda **options:tk.Canvas(root,**options))(
+            width=total_width, height=panel_height,
             bg=TRANSPARENT_KEY, highlightthickness=0, bd=0,
         )
         self.status_canvas.place(x=0, y=0, relwidth=1, relheight=1)
         rounded_radius = round(18 / self.ui_scale)
         _rounded_rectangle(
-            self.status_canvas, 0, 0, status_width, panel_height, rounded_radius,
+            self.status_canvas, 0, 0, total_width, panel_height, rounded_radius,
             fill=PANEL_BG, outline=PANEL_BORDER, width=1,
-        )
-        self.status_canvas.create_rectangle(
-            status_width - rounded_radius, 0, status_width, panel_height,
-            fill=PANEL_BG, outline="",
         )
         self.state_dot = self.status_canvas.create_oval(
             round(14 / self.ui_scale), round((PANEL_HEIGHT-INDICATOR_DIAMETER)/2 / self.ui_scale),
             round((14+INDICATOR_DIAMETER) / self.ui_scale), round((PANEL_HEIGHT+INDICATOR_DIAMETER)/2 / self.ui_scale),
             fill="#4ADE80", outline="",
+        )
+        self.state_count = self.status_canvas.create_text(
+            round((14+INDICATOR_DIAMETER/2) / self.ui_scale), round((PANEL_HEIGHT/2) / self.ui_scale),
+            text="", fill="#FFFFFF",
+            font=("Microsoft YaHei UI", -max(9,round(18/self.ui_scale)), "bold"),
         )
         self.state_item = self.status_canvas.create_text(
             round(TEXT_LEFT / self.ui_scale), round(24 / self.ui_scale),
@@ -461,25 +522,14 @@ class ProgressWindow:
             font=("Microsoft YaHei UI", -max(7,round(11/self.ui_scale))),
         )
 
-        self.button_canvas = tk.Canvas(
-            self.button_window, width=button_width, height=panel_height,
-            bg=TRANSPARENT_KEY, highlightthickness=0, bd=0,
-        )
-        self.button_canvas.place(x=0, y=0, relwidth=1, relheight=1)
-        _rounded_rectangle(
-            self.button_canvas, 0, 0, button_width, panel_height, rounded_radius,
-            fill=PANEL_BG, outline=PANEL_BORDER, width=1,
-        )
-        self.button_canvas.create_rectangle(
-            0, 0, rounded_radius, panel_height, fill=PANEL_BG, outline="",
-        )
+        self.button_canvas = self.status_canvas
         geometry=button_geometry(self.ui_scale)
-        button_y=geometry["y"];button_gap=geometry["gap"];button_x=geometry["x"]
+        button_y=geometry["y"];button_gap=geometry["gap"];button_x=status_width+geometry["x"]
         button_h=geometry["height"];button_widths=geometry["widths"]
         self.button_rects = []
         self.button_texts = []
-        self.button_enabled = [False, True, True]
-        labels = ["暂停", "结束", "查看报告"]
+        self.button_enabled = [False, True, True, True]
+        labels = ["暂停", "结束", "查看报告", "主屏"]
         for index, (label, width) in enumerate(zip(labels, button_widths)):
             x1 = button_x + sum(button_widths[:index]) + button_gap * index
             x2 = x1 + width
@@ -506,19 +556,76 @@ class ProgressWindow:
         self.button_canvas.tag_bind("button-0", "<Button-1>", lambda _e: self.pause_or_resume() if self.pause_enabled else None)
         self.button_canvas.tag_bind("button-1", "<Button-1>", lambda _e: self.stop())
         self.button_canvas.tag_bind("button-2", "<Button-1>", lambda _e: self.open_report())
+        self.button_canvas.tag_bind("button-3", "<Button-1>", lambda _e: self.toggle_display())
 
+        root.withdraw()
+        self.button_window.withdraw()
+        if os.name=='nt':
+            root.attributes('-disabled',True)
+            self.button_window.attributes('-disabled',True)
+        configure_overlay_windows(root,self.button_window)
+        root.update_idletasks()
+        self.button_window.update_idletasks()
+        configure_overlay_windows(root, self.button_window)
+        if os.name=='nt':
+            for widget in (root,self.button_window):
+                ctypes.windll.user32.ShowWindow(wintypes.HWND(widget.winfo_id()),4)
+                ctypes.windll.user32.ShowWindow(wintypes.HWND(_top_level_handle(widget)),4)
+        else:
+            root.deiconify()
+            self.button_window.deiconify()
         root.update_idletasks()
         self.button_window.update_idletasks()
         configure_overlay_windows(root, self.button_window)
         root.protocol("WM_DELETE_WINDOW", self.stop)
         self.button_window.protocol("WM_DELETE_WINDOW", self.stop)
+        root.update()
+        if os.name=='nt':
+            root.attributes('-disabled',False)
+            self.button_window.attributes('-disabled',False)
+            configure_overlay_windows(root,self.button_window)
         self.refresh()
 
     def _hover_button(self, index: int, hovering: bool) -> None:
         enabled = self.button_enabled[index]
         self.button_canvas.configure(cursor="hand2" if enabled else "")
-        fill = ("#15803D" if hovering else "#166534") if enabled and index==0 else BUTTON_ACTIVE_BG if enabled and hovering else (BUTTON_BG if enabled else BUTTON_DISABLED_BG)
+        fill = BUTTON_ACTIVE_BG if enabled and hovering else (BUTTON_BG if enabled else BUTTON_DISABLED_BG)
+        if index==3 and enabled:
+            fill=DISPLAY_BUTTON_COLORS[self.display_button['color']][bool(hovering)]
         self.button_canvas.itemconfigure(self.button_rects[index], fill=fill)
+
+    def toggle_display(self) -> None:
+        if getattr(self,'terminating',False) or self.switching_display:
+            return
+        if self.demo:
+            self.display_notice='演示模式不移动真实 Codex 窗口。'
+            self.display_notice_until=time.monotonic()+8
+            self.refresh()
+            return
+        self.switching_display=True
+        self.display_result=None
+        self.button_enabled[3]=False
+        self.button_canvas.itemconfigure(self.button_texts[3],text='切换中…')
+        self.button_canvas.itemconfigure(self.button_rects[3],fill=BUTTON_DISABLED_BG)
+        def worker():
+            try:
+                with contextlib.closing(ledger.connect(self.db_path)) as db:
+                    result=display_switch.toggle(db,self.run_id)
+                self.display_result=f"Codex 已切换到{result['display']}。"
+            except Exception as exc:
+                self.display_result='屏幕切换未完成：'+str(exc)
+        threading.Thread(target=worker,daemon=True).start()
+        self.root.after(100,self.finish_display_switch)
+
+    def finish_display_switch(self) -> None:
+        if getattr(self,'terminating',False):return
+        if self.display_result is None:
+            self.root.after(100,self.finish_display_switch)
+            return
+        self.switching_display=False
+        self.display_notice=self.display_result
+        self.display_notice_until=time.monotonic()+10
+        self.refresh()
 
     def read(self) -> dict:
         db = ledger.connect(self.db_path)
@@ -542,11 +649,27 @@ class ProgressWindow:
         if self.timer is not None:
             self.root.after_cancel(self.timer)
             self.timer = None
+        if not self.demo and not self.message_poll_busy and time.monotonic()-self.last_message_poll >= 15:
+            self.last_message_poll = time.monotonic()
+            self.message_poll_busy = True
+            def poll_messages():
+                try:
+                    import message_badge
+                    with contextlib.closing(ledger.connect(self.db_path)) as badge_db:
+                        message_badge.poll(badge_db,self.run_id)
+                except (OSError,RuntimeError,ValueError,sqlite3.Error):
+                    pass  # An unreadable badge never becomes a new-message event.
+                finally:
+                    self.message_poll_busy = False
+            threading.Thread(target=poll_messages,daemon=True).start()
         try:
             data = self.read()
             state = data["state"]
             with contextlib.closing(ledger.connect(self.db_path)) as monitor_db:
                 monitor = monitor_db.execute('SELECT value FROM settings WHERE key=?', ('chat_watchdog/'+self.run_id,)).fetchone()
+                if not self.demo and not self.switching_display:
+                    try:self.display_button=display_switch.button_state(monitor_db,self.run_id)
+                    except (OSError,ValueError):pass  # Clicking still performs the full live binding check.
             monitor = json.loads(monitor[0]) if monitor else {}
             import chat_watchdog
             monitor = chat_watchdog.display_state(monitor)
@@ -556,6 +679,9 @@ class ProgressWindow:
                 return
             signal,label=indicator(data)
             self.status_canvas.itemconfigure(self.state_dot, fill=SIGNAL_COLORS[signal])
+            count=int(data.get('message_count') or 0)
+            self.status_canvas.itemconfigure(self.state_count,
+                text=(str(count) if 0<count<=99 else '99+' if count>99 else ''))
             interrupt=data.get('interrupt_status') or ''
             step=data['current_step']
             if data.get('notice_wait'):
@@ -577,14 +703,14 @@ class ProgressWindow:
             if monitor.get('alert'):
                 self.status_canvas.itemconfigure(self.detail_item, text=monitor['alert'])
             self.pause_enabled = state == 'running' and not getattr(self,'pausing',False)
-            self.button_enabled = [self.pause_enabled, True, True]
+            self.button_enabled = [self.pause_enabled, True, True, not self.switching_display]
             self.button_canvas.itemconfigure(
                 self.button_texts[0], text="请在 Codex中\n回复“继续”" if state == "paused" else "暂停",
                 fill="#F4F7FA" if state == 'paused' or self.pause_enabled else "#7C8A97",
             )
             self.button_canvas.itemconfigure(
                 self.button_rects[0],
-                fill="#166534" if self.pause_enabled else BUTTON_DISABLED_BG,
+                fill=BUTTON_BG if self.pause_enabled else BUTTON_DISABLED_BG,
             )
             self.button_canvas.itemconfigure(self.button_rects[1], fill=BUTTON_BG)
             self.button_canvas.itemconfigure(self.button_texts[1], fill="#F4F7FA")
@@ -600,13 +726,18 @@ class ProgressWindow:
             self.status_canvas.itemconfigure(self.detail_item, text=str(exc)[:100])
             self.pause_enabled = False
             self.detail_metrics_key = None
-            self.button_enabled = [False, True, True]
+            self.button_enabled = [False, True, True, not self.switching_display]
             self.button_canvas.itemconfigure(self.button_rects[0], fill=BUTTON_DISABLED_BG)
             self.button_canvas.itemconfigure(self.button_texts[0], fill="#7C8A97")
             self.button_canvas.itemconfigure(self.button_rects[1], fill=BUTTON_BG)
             self.button_canvas.itemconfigure(self.button_texts[1], fill="#F4F7FA")
             self.button_canvas.itemconfigure(self.button_rects[2], fill=BUTTON_BG)
             self.button_canvas.itemconfigure(self.button_texts[2], fill="#F4F7FA")
+        if time.monotonic()<self.display_notice_until:
+            self.status_canvas.itemconfigure(self.detail_item,text=self.display_notice)
+            self.detail_metrics_key=None
+        self.button_canvas.itemconfigure(self.button_texts[3],text='切换中…' if self.switching_display else self.display_button['label'],fill=PANEL_MUTED if self.switching_display else PANEL_BG)
+        self.button_canvas.itemconfigure(self.button_rects[3],fill=BUTTON_DISABLED_BG if self.switching_display else DISPLAY_BUTTON_COLORS[self.display_button['color']][0])
         configure_overlay_windows(self.root, self.button_window)
         self.timer = self.root.after(1000, self.refresh)
 
@@ -635,11 +766,11 @@ class ProgressWindow:
             self.root.after_cancel(self.timer)
             self.timer = None
         self.pause_enabled=False
-        self.button_enabled=[False,False,False]
+        self.button_enabled=[False,False,False,False]
         self.status_canvas.itemconfigure(self.state_dot,fill=SIGNAL_COLORS['gray'])
         self.status_canvas.itemconfigure(self.state_item,text='正在关闭……')
         self.status_canvas.itemconfigure(self.detail_item,text='正在停止任务并整理记录，请稍候。')
-        for index in range(3):
+        for index in range(4):
             self.button_canvas.itemconfigure(self.button_rects[index],fill=BUTTON_DISABLED_BG)
             self.button_canvas.itemconfigure(self.button_texts[index],fill='#7C8A97')
         self.button_canvas.itemconfigure(self.button_texts[1],text='关闭中…')
@@ -671,22 +802,20 @@ class ProgressWindow:
                     db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
                         ('close_report_pending/'+self.run_id,error))
             if stopped:
-                try:
-                    messagebox.showwarning('任务已停止，记录待补',
-                        '任务已停止，窗口将关闭。记录整理尚未完成，下次启动时会重新尝试。\n'+error,
-                        parent=self.root)
-                finally:self.root.destroy()
+                self.root.destroy()
+                messagebox.showwarning('任务已停止，记录待补',
+                    '任务已停止，窗口将关闭。记录整理尚未完成，下次启动时会重新尝试。\n'+error)
                 return
             self.terminating=False
             self.status_canvas.itemconfigure(self.state_dot,fill=SIGNAL_COLORS['red'])
             self.status_canvas.itemconfigure(self.state_item,text='关闭失败，请重试结束')
             self.status_canvas.itemconfigure(self.detail_item,text=error[:100])
-            self.button_enabled=[False,True,True]
-            for index in (1,2):
+            self.button_enabled=[False,True,True,True]
+            for index in (1,2,3):
                 self.button_canvas.itemconfigure(self.button_rects[index],fill=BUTTON_BG)
                 self.button_canvas.itemconfigure(self.button_texts[index],fill='#F4F7FA')
             self.button_canvas.itemconfigure(self.button_texts[1],text='结束')
-            messagebox.showerror("结束失败",error,parent=self.root)
+            messagebox.showerror("结束失败",error,parent=dialog_parent(self.root))
             return
         if not self.demo:
             with contextlib.closing(ledger.connect(self.db_path)) as db:
@@ -694,22 +823,21 @@ class ProgressWindow:
             if status.startswith(('failed','not_bound')):
                 import error_alert
                 error_alert.play()
-                messagebox.showwarning('招聘已结束','招聘已停止并完成收尾，但中断当前聊天时出现问题，请检查 Codex 状态；详细原因已记录在运行结果。',parent=self.root)
+                messagebox.showwarning('招聘已结束','招聘已停止并完成收尾，但中断当前聊天时出现问题，请检查 Codex 状态；详细原因已记录在运行结果。',parent=dialog_parent(self.root))
             # An unavailable chat/composer state is recorded as unconfirmed;
             # it must not turn successful recruiting cleanup into an error popup.
-        self.status_canvas.itemconfigure(self.state_item,text='已关闭')
-        self.status_canvas.itemconfigure(self.detail_item,text='任务已结束，记录整理完成。')
-        try:
-            if messagebox.askyesno('招聘已结束','是否打开 Excel 招呼记录？',parent=self.root):
-                if report:
-                    try:os.startfile(report)
-                    except OSError as exc:
-                        import error_alert
-                        error_alert.play()
-                        messagebox.showerror('打开 Excel 失败',str(exc),parent=self.root)
-                else:
-                    messagebox.showinfo('Excel 待同步','任务已结束，但 Excel 报表尚未同步完成，暂时无法打开。',parent=self.root)
-        finally:self.root.destroy()
+        # The no-activate overlay must disappear before a modal report prompt.
+        # Otherwise an unseen prompt can leave a misleading "已关闭" bar on screen.
+        self.root.destroy()
+        if messagebox.askyesno('招聘已结束','是否打开 Excel 招呼记录？'):
+            if report:
+                try:os.startfile(report)
+                except OSError as exc:
+                    import error_alert
+                    error_alert.play()
+                    messagebox.showerror('打开 Excel 失败',str(exc))
+            else:
+                messagebox.showinfo('Excel 待同步','任务已结束，但 Excel 报表尚未同步完成，暂时无法打开。')
 
     def stop(self) -> None:
         if getattr(self,'terminating',False):
@@ -728,13 +856,13 @@ class ProgressWindow:
             with contextlib.closing(ledger.connect(self.db_path)) as db:
                 path=report_snapshot(db,self.run_id,self.output_root)
             if not path.is_file():
-                messagebox.showinfo("简报尚未生成", "处理完第一位候选人后，简报才会生成。", parent=self.root)
+                messagebox.showinfo("简报尚未生成", "处理完第一位候选人后，简报才会生成。", parent=dialog_parent(self.root))
                 return
             os.startfile(path)
         except (OSError, ValueError, sqlite3.Error) as exc:
             import error_alert
             error_alert.play()
-            messagebox.showerror("打开报告失败", str(exc), parent=self.root)
+            messagebox.showerror("打开报告失败", str(exc), parent=dialog_parent(self.root))
 
 
 def main() -> None:
@@ -748,7 +876,7 @@ def main() -> None:
     args = parser.parse_args()
     with contextlib.closing(ledger.connect(args.db)) as db:
         ledger.run_row(db, args.run)
-    root = tk.Tk()
+    root = create_overlay_root()
     window=ProgressWindow(root,args.db,args.run,args.output_root,demo=args.demo)
     try: root.mainloop()
     finally: window.wake.close()
