@@ -19,13 +19,14 @@ SETTING_ALIASES = {
     '连续招呼五次后额外休息': SETTINGS[1],
     '同事几天以上可打招呼（填 0 为不判断同事）': SETTINGS[2],
     '同事几天以上可打招呼（填0为不判断同事）': SETTINGS[2],
+    '沟通Boss门槛': '沟通率筛选',
 }
 OVERALL_REVIEW = '减分至合格线后AI整体复盘'
 PASS_REVIEW = '过及格线就进行AI整体复盘'
 LOCATION_FILTER = '偏好地点筛选'
 INTENT_FILTER = '求职意愿筛选'
 ANALYZER_ABSENT_POLICY = '无牛人分析器处理'
-COMMUNICATION_BOSS_FILTER = '沟通Boss门槛'
+COMMUNICATION_BOSS_FILTER = '沟通率筛选'
 COMMUNICATION_BOSS_UNKNOWN = '沟通Boss未知处理'
 TEXT_SECTIONS = ('AI整体复盘规则', '偏好地点筛选')
 
@@ -104,6 +105,7 @@ def parse(text):
     if len(titles) != 1 or '{{' in titles[0]:
         raise ConfigError('请在第一行填写实际岗位名称')
     sections, current, sub = {}, None, None
+    ignored_sections, ignored_settings = [], []
     for line in text.splitlines():
         location_switch = re.fullmatch(r'##\s*偏好地点筛选\s*[：:]\s*(开|关)\s*', line)
         if location_switch:
@@ -113,9 +115,14 @@ def parse(text):
         heading = re.fullmatch(r'##\s*([^#].+?)\s*[：:]?\s*', line)
         item = re.fullmatch(r'### +([123])\.\s*(初筛词库|减分词库|否决词库|误判复诊)\s*', line)
         if heading:
-            current, sub = heading[1].rstrip('：:').strip(), None
-            if current not in (*HEADINGS, *TEXT_SECTIONS) or current in sections:
+            title = heading[1].rstrip('：:').strip()
+            if title not in (*HEADINGS, *TEXT_SECTIONS):
+                ignored_sections.append(title)
+                current, sub = None, None
+                continue
+            if title in sections:
                 raise ConfigError('请保留模板的三个板块，且不要重复')
+            current, sub = title, None
             sections[current] = {}
         elif item:
             if current not in HEADINGS[:2] or not ((item[1], item[2]) in (('1', '初筛词库'), ('2', '减分词库')) or (current == HEADINGS[0] and (item[1], item[2]) == ('2', '否决词库')) or (current == HEADINGS[1] and (item[1], item[2]) == ('3', '误判复诊'))):
@@ -143,13 +150,17 @@ def parse(text):
                 raise ConfigError('误判复诊请填写“开”或“关”')
             config[stage]['misjudgment_review'] = review == '开'
     settings = {}
+    known = (*SETTINGS, OVERALL_REVIEW, PASS_REVIEW, LOCATION_FILTER,
+             INTENT_FILTER, ANALYZER_ABSENT_POLICY,
+             COMMUNICATION_BOSS_FILTER, COMMUNICATION_BOSS_UNKNOWN)
     for line in clean('\n'.join(sections[HEADINGS[2]].get(None, []))).splitlines():
         match = re.fullmatch(r'(.+?)\s*[：:]\s*(.*)', line)
         label = SETTING_ALIASES.get(match[1], match[1]) if match else None
-        if not match or label not in (*SETTINGS, OVERALL_REVIEW, PASS_REVIEW, LOCATION_FILTER,
-                                      INTENT_FILTER, ANALYZER_ABSENT_POLICY,
-                                      COMMUNICATION_BOSS_FILTER, COMMUNICATION_BOSS_UNKNOWN) or label in settings:
-            raise ConfigError('其他配置名称与模板不一致，或重复填写')
+        if not match or label not in known:
+            ignored_settings.append(line if not match else label)
+            continue
+        if label in settings:
+            raise ConfigError('其他配置“'+label+'”重复填写')
         settings[label] = match[2]
     settings.setdefault(SETTINGS[0], '30 秒')
     settings.setdefault(OVERALL_REVIEW, '开')
@@ -185,10 +196,15 @@ def parse(text):
     config['ai_total_review'] = settings[SETTINGS[4]] == '开'
     config['overall_review_on_pass'] = settings[PASS_REVIEW] == '开'
     config['preferred_location_filter_enabled'] = settings[LOCATION_FILTER] == '开'
-    config['intent_filter_enabled'] = settings[INTENT_FILTER] != '关'
-    config['intent_preferences'] = words(settings[INTENT_FILTER]) if config['intent_filter_enabled'] else []
-    if config['intent_filter_enabled'] and any(value not in ('较强', '强') for value in config['intent_preferences']):
-        raise ConfigError('求职意愿筛选只支持“较强”和“强”')
+    intent_rank = ('一般', '较强', '强', '很强')
+    intent_value = settings[INTENT_FILTER].strip()
+    config['intent_filter_enabled'] = intent_value not in ('关', '关闭')
+    intent_values = words(intent_value) if config['intent_filter_enabled'] else []
+    if config['intent_filter_enabled'] and (not intent_values or any(value not in intent_rank for value in intent_values)):
+        raise ConfigError('求职意愿筛选请填写“关”“一般”“强”或“很强”')
+    # Older files may contain a list such as 较强、强. Its lowest value is the
+    # threshold; every stronger observed grade must also pass.
+    config['intent_preferences'] = list(intent_rank[min(intent_rank.index(v) for v in intent_values):]) if intent_values else []
     if settings[ANALYZER_ABSENT_POLICY] not in ('符合', '放弃'):
         raise ConfigError('无牛人分析器处理请填写“符合”或“放弃”')
     config['analyzer_absent_policy'] = 'pass' if settings[ANALYZER_ABSENT_POLICY] == '符合' else 'skip'
@@ -197,7 +213,7 @@ def parse(text):
     if config['communication_boss_filter_enabled']:
         rate_match = re.fullmatch(r'(\d{1,3}(?:\.\d+)?)\s*(?:%|％)?', rate_value)
         if not rate_match or not 0 <= float(rate_match[1]) <= 100:
-            raise ConfigError('沟通Boss门槛请填写“关”或 0–100 的百分位，例如 90')
+            raise ConfigError('沟通率筛选请填写“0%”或 0–100 的百分位，例如 90')
         config['communication_boss_minimum'] = float(rate_match[1])
     else:
         config['communication_boss_minimum'] = 0.0
@@ -207,6 +223,7 @@ def parse(text):
     config['overall_review_rules'] = clean('\n'.join(sections.get(TEXT_SECTIONS[0], {}).get(None, [])))
     import preferred_locations
     config['preferred_locations'] = preferred_locations.parse_config(clean('\n'.join(sections.get(TEXT_SECTIONS[1], {}).get(None, []))))
+    config['ignored_fields'] = list(dict.fromkeys(ignored_sections + ignored_settings))
     return config
 
 

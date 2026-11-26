@@ -4,7 +4,7 @@ import re
 
 _INTENT = re.compile(
     r'求职意愿\s*(?:(?:为|是)\s*)?[：:]?\s*'
-    r'(较强|强|一般|较低|低)'
+    r'(很强|较强|强|一般|较低|低)'
 )
 _ANALYZER = re.compile(r'(?:BOSS)?牛人分析器|查看全部\d+项分析')
 _COMMUNICATION_BOSS = re.compile(
@@ -60,7 +60,7 @@ def evaluate_intent(enabled, accepted, text):
 
 def evaluate_communication_boss(enabled, minimum, unknown_policy, text):
     if not enabled:
-        return dict(state='disabled', reason='沟通Boss门槛已关闭')
+        return dict(state='disabled', reason='沟通率筛选已关闭')
     normalized = _normalize(text)
     values = []
     for match in list(_COMMUNICATION_BOSS.finditer(normalized)) + list(_COMMUNICATION_RATE.finditer(normalized)):
