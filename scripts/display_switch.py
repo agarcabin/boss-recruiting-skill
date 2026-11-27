@@ -10,6 +10,7 @@ import subprocess
 
 import powershell_host
 import run_safety
+import virtual_display
 from windows_process import hidden_options, decode_output
 
 SWP_PASSIVE = 0x0004 | 0x0010 | 0x0200  # NOZORDER | NOACTIVATE | NOOWNERZORDER
@@ -150,10 +151,21 @@ def toggle(db, run_id, native=None):
         if native.window_pid(hwnd) != int(binding['process_id']):
             raise ValueError('绑定的 Codex 窗口已改变，未移动其他窗口。')
         monitors = native.monitors()
+        if len(virtual_display.physical_monitors(monitors)) >= 2:
+            virtual_display.release_all()
+            monitors = native.monitors()
         row = db.execute('SELECT value FROM settings WHERE key=?', ('secondary_display/'+run_id,)).fetchone()
         current=native.monitor_for_window(hwnd)
         source=next((item for item in monitors if item['handle']==current),None)
-        target = destination(monitors, current, row[0] if row else None)
+        primary = primary_monitor(monitors)
+        if current == primary['handle'] and len(virtual_display.physical_monitors(monitors)) < 2:
+            started = virtual_display.ensure(db, run_id, hwnd, native)
+            monitors = native.monitors()
+            target = next((item for item in monitors if item['device'] == started.get('device')), None)
+            if target is None:
+                raise ValueError('虚拟副屏已启动但未找到目标屏幕，请检查 Windows 显示设置。')
+        else:
+            target = destination(monitors, current, row[0] if row else None)
         native.move(hwnd, target['work'])
         if native.monitor_for_window(hwnd) != target['handle']:
             raise ValueError('尚未确认窗口已移至目标屏幕，请检查显示设置。')
@@ -161,4 +173,6 @@ def toggle(db, run_id, native=None):
             db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', ('secondary_display/'+run_id, target['device']))
         elif source and not source['primary']:
             db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', ('secondary_display/'+run_id, source['device']))
+            if virtual_display.is_virtual_device(source['device']):
+                virtual_display.after_return(db, run_id, hwnd, native)
         return dict(state='moved', display='主屏' if target['primary'] else '副屏', device=target['device'], hwnd=hwnd)

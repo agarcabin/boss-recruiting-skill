@@ -828,6 +828,11 @@ class ProgressWindow:
             # it must not turn successful recruiting cleanup into an error popup.
         # The no-activate overlay must disappear before a modal report prompt.
         # Otherwise an unseen prompt can leave a misleading "已关闭" bar on screen.
+        try:
+            import virtual_display
+            virtual_display.release_all()
+        except Exception:
+            pass
         self.root.destroy()
         if messagebox.askyesno('招聘已结束','是否打开 Excel 招呼记录？'):
             if report:
@@ -840,6 +845,11 @@ class ProgressWindow:
                 messagebox.showinfo('Excel 待同步','任务已结束，但 Excel 报表尚未同步完成，暂时无法打开。')
 
     def stop(self) -> None:
+        try:
+            import virtual_display
+            virtual_display.release_all()
+        except Exception:
+            pass
         if getattr(self,'terminating',False):
             with contextlib.closing(ledger.connect(self.db_path)) as db:
                 if ledger.run_row(db,self.run_id)['stop_reason']:

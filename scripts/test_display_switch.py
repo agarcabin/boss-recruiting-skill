@@ -15,6 +15,7 @@ import foreground_activity
 import progress_window
 import powershell_host
 import launch_progress
+import virtual_display
 
 
 PRIMARY=dict(handle=1,device='primary',primary=True,bounds=(0,0,1920,1080),work=(0,0,1920,1040))
@@ -58,12 +59,18 @@ class DisplayRoutingTests(unittest.TestCase):
         # A manually selected secondary must be used on the next outward switch.
         self.assertEqual(self.toggle()['device'],'third')
 
-    def test_missing_secondary_never_moves_primary_window(self):
+    def test_single_monitor_starts_virtual_secondary(self):
+        virtual={**SECONDARY,'handle':3,'device':'virtual','bounds':(1920,0,3840,1080),'work':(1920,0,3840,1080)}
         self.native.monitors.return_value=[PRIMARY]
-        self.native.monitor_for_window.return_value=1
-        with self.assertRaisesRegex(ValueError,'未检测到'):
-            self.toggle()
-        self.native.move.assert_not_called()
+        self.native.monitors.side_effect=[[PRIMARY],[PRIMARY,virtual]]
+        self.native.monitor_for_window.side_effect=[1,3]
+        with patch.object(virtual_display,'physical_monitors',return_value=[PRIMARY]), \
+                patch.object(virtual_display,'ensure',return_value=dict(state='started',device='virtual',monitor=virtual)) as ensure:
+            result=self.toggle()
+        ensure.assert_called_once()
+        self.assertEqual(result['display'],'副屏')
+        self.assertEqual(result['device'],'virtual')
+        self.assertEqual(self.native.move.call_args.args,(123,virtual['work']))
 
     def test_stale_window_pid_is_rejected(self):
         self.native.window_pid.return_value=99
@@ -113,7 +120,7 @@ class DisplayRoutingTests(unittest.TestCase):
         status.winfo_width.return_value=710
         buttons.winfo_width.return_value=400
         self.native.api.GetWindowRect.return_value=True
-        with patch.object(progress_window,'_top_level_handle',side_effect=[11,22]):
+        with patch.object(progress_window,'_top_level_handle',side_effect=[11,22,11,22]):
             progress_window.pin_overlay_to_primary(status,buttons,self.native)
         calls=self.native.api.SetWindowPos.call_args_list
         self.assertEqual([call.args[2:4] for call in calls],[(405,6),(1115,6)])

@@ -109,6 +109,11 @@ def final_report(db,run_id,root):
 
 def finalize(db,run_id,root,interrupt=True,opener=None):
     import candidate_log
+    try:
+        import virtual_display
+        virtual_display.release_all()
+    except Exception:
+        pass
     candidate_log.table(db)
     with run_safety.action_lock(db):
         run=ledger.run_row(db,run_id)
