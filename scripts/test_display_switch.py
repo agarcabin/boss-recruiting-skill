@@ -83,6 +83,28 @@ class DisplayRoutingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'尚未确认'):
             self.toggle()
 
+    def test_maximized_window_restores_moves_and_maximizes(self):
+        native=object.__new__(display_switch.NativeDisplays)
+        native.api=Mock()
+        native.api.IsIconic.return_value=False
+        native.api.IsZoomed.return_value=True
+        native.api.SetWindowPos.return_value=True
+        native.api.GetWindowRect.return_value=True
+        native.move(123,(2560,0,4480,1032))
+        self.assertEqual([call.args[1] for call in native.api.ShowWindow.call_args_list],
+                         [display_switch.SW_RESTORE,display_switch.SW_MAXIMIZE])
+        self.assertEqual(native.api.SetWindowPos.call_args.args[2:6],(2560,0,1920,1032))
+
+    def test_normal_window_moves_without_restore(self):
+        native=object.__new__(display_switch.NativeDisplays)
+        native.api=Mock()
+        native.api.IsIconic.return_value=False
+        native.api.IsZoomed.return_value=False
+        native.api.SetWindowPos.return_value=True
+        native.api.GetWindowRect.return_value=True
+        native.move(123,(2560,0,4480,1032))
+        native.api.ShowWindow.assert_not_called()
+
     def test_binding_from_another_run_cannot_be_used(self):
         with self.assertRaisesRegex(ValueError,'尚未绑定'):
             display_switch.bound_window(self.db,'other')

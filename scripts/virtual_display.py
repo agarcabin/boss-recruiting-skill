@@ -65,6 +65,31 @@ class DISPLAY_DEVICE(ctypes.Structure):
                 ("DeviceID", wintypes.WCHAR * 128), ("DeviceKey", wintypes.WCHAR * 128)]
 
 
+class DEVMODEW(ctypes.Structure):
+    _fields_ = [
+        ("dmDeviceName", wintypes.WCHAR * 32), ("dmSpecVersion", wintypes.WORD),
+        ("dmDriverVersion", wintypes.WORD), ("dmSize", wintypes.WORD),
+        ("dmDriverExtra", wintypes.WORD), ("dmFields", wintypes.DWORD),
+        ("dmPositionX", wintypes.LONG), ("dmPositionY", wintypes.LONG),
+        ("dmDisplayOrientation", wintypes.DWORD), ("dmDisplayFixedOutput", wintypes.DWORD),
+        ("dmColor", wintypes.SHORT), ("dmDuplex", wintypes.SHORT),
+        ("dmYResolution", wintypes.SHORT), ("dmTTOption", wintypes.SHORT),
+        ("dmCollate", wintypes.SHORT), ("dmFormName", wintypes.WCHAR * 32),
+        ("dmLogPixels", wintypes.WORD), ("dmBitsPerPel", wintypes.DWORD),
+        ("dmPelsWidth", wintypes.DWORD), ("dmPelsHeight", wintypes.DWORD),
+        ("dmDisplayFlags", wintypes.DWORD), ("dmDisplayFrequency", wintypes.DWORD),
+        ("dmICMMethod", wintypes.DWORD), ("dmICMIntent", wintypes.DWORD),
+        ("dmMediaType", wintypes.DWORD), ("dmDitherType", wintypes.DWORD),
+        ("dmReserved1", wintypes.DWORD), ("dmReserved2", wintypes.DWORD),
+        ("dmPanningWidth", wintypes.DWORD), ("dmPanningHeight", wintypes.DWORD),
+    ]
+
+
+ENUM_CURRENT_SETTINGS = 0xFFFFFFFF
+DM_PELSWIDTH, DM_PELSHEIGHT, DM_DISPLAYFREQUENCY = 0x00080000, 0x00100000, 0x00400000
+CDS_UPDATEREGISTRY = 0x00000001
+
+
 VDD_GUID = GUID.from_buffer_copy(uuid.UUID(VDD_GUID_TEXT).bytes_le)
 _setupapi = ctypes.WinDLL("setupapi", use_last_error=True)
 _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -99,6 +124,11 @@ _kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
 _user32.EnumDisplayDevicesW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD,
                                         ctypes.POINTER(DISPLAY_DEVICE), wintypes.DWORD)
 _user32.EnumDisplayDevicesW.restype = wintypes.BOOL
+_user32.EnumDisplaySettingsW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(DEVMODEW))
+_user32.EnumDisplaySettingsW.restype = wintypes.BOOL
+_user32.ChangeDisplaySettingsExW.argtypes = (wintypes.LPCWSTR, ctypes.POINTER(DEVMODEW),
+                                             wintypes.HWND, wintypes.DWORD, ctypes.c_void_p)
+_user32.ChangeDisplaySettingsExW.restype = wintypes.LONG
 
 _session = None
 _session_lock = threading.Lock()
@@ -225,6 +255,60 @@ def _right_of_primary(primary, monitor):
     return abs(top - ptop) <= 2 and left >= pright - 4 and left > pleft
 
 
+def _devmode(device, index):
+    value = DEVMODEW()
+    value.dmSize = ctypes.sizeof(value)
+    if not _user32.EnumDisplaySettingsW(device, index, ctypes.byref(value)):
+        return None
+    return value
+
+
+def _best_mode(device, width, height):
+    exact = []
+    same_ratio = []
+    index = 0
+    while True:
+        mode = _devmode(device, index)
+        if mode is None:
+            break
+        index += 1
+        if mode.dmPelsWidth == width and mode.dmPelsHeight == height:
+            exact.append((mode.dmDisplayFrequency, mode.dmPelsWidth, mode.dmPelsHeight))
+        elif abs((mode.dmPelsWidth / max(1, mode.dmPelsHeight)) - (width / max(1, height))) < 0.02:
+            same_ratio.append((mode.dmPelsWidth * mode.dmPelsHeight,
+                               mode.dmDisplayFrequency, mode.dmPelsWidth, mode.dmPelsHeight))
+    if exact:
+        frequency, w, h = max(exact)
+        return w, h, frequency
+    if same_ratio:
+        _area, frequency, w, h = max(same_ratio)
+        return w, h, frequency
+    return None
+
+
+def _match_primary_mode(device, primary):
+    width = primary["bounds"][2] - primary["bounds"][0]
+    height = primary["bounds"][3] - primary["bounds"][1]
+    current = _devmode(device, ENUM_CURRENT_SETTINGS)
+    if current is None:
+        return dict(changed=False, reason="mode_unreadable")
+    if current.dmPelsWidth == width and current.dmPelsHeight == height:
+        return dict(changed=False, width=width, height=height, frequency=current.dmDisplayFrequency)
+    best = _best_mode(device, width, height)
+    if best is None:
+        return dict(changed=False, reason="mode_unsupported", width=current.dmPelsWidth,
+                    height=current.dmPelsHeight)
+    target_width, target_height, frequency = best
+    mode = _devmode(device, ENUM_CURRENT_SETTINGS)
+    mode.dmPelsWidth = target_width
+    mode.dmPelsHeight = target_height
+    mode.dmDisplayFrequency = frequency
+    mode.dmFields |= DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY
+    result = _user32.ChangeDisplaySettingsExW(device, ctypes.byref(mode), None, CDS_UPDATEREGISTRY, None)
+    return dict(changed=result == 0, result=result, width=target_width, height=target_height,
+                frequency=frequency)
+
+
 class _Session:
     def __init__(self, native, hwnd):
         self.native = native
@@ -284,6 +368,11 @@ class _Session:
         if monitor is None:
             self.release()
             raise VirtualDisplayError("virtual_display_monitor_not_detected")
+        mode = _match_primary_mode(monitor["device"], primary)
+        if mode.get("changed"):
+            time.sleep(0.4)
+            monitors = self.native.monitors()
+            monitor = next((item for item in monitors if item["device"] == monitor["device"]), monitor)
         after_primary = _primary(monitors)
         if (after_primary["device"] != primary["device"] or
                 after_primary["bounds"] != primary["bounds"]):
@@ -297,7 +386,7 @@ class _Session:
         self.device = monitor["device"]
         self.startup_ms = elapsed
         return dict(state="started", device=self.device, startup_ms=elapsed, mode=self.mode,
-                    monitor=monitor, primary=primary)
+                    monitor=monitor, primary=primary, display_mode=mode)
 
     def release(self):
         if self.stop.is_set():

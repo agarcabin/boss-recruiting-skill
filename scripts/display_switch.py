@@ -14,6 +14,8 @@ import virtual_display
 from windows_process import hidden_options, decode_output
 
 SWP_PASSIVE = 0x0004 | 0x0010 | 0x0200  # NOZORDER | NOACTIVATE | NOOWNERZORDER
+SW_RESTORE = 9
+SW_MAXIMIZE = 3
 
 
 class MonitorInfo(ctypes.Structure):
@@ -41,10 +43,13 @@ class NativeDisplays:
         self.api.MonitorFromWindow.argtypes = (wintypes.HWND, wintypes.DWORD)
         self.api.MonitorFromWindow.restype = wintypes.HANDLE
         self.api.GetWindowRect.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.RECT))
+        self.api.GetWindowRect.restype = wintypes.BOOL
         self.api.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
         self.api.SetWindowPos.argtypes = (wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
                                          ctypes.c_int, ctypes.c_int, wintypes.UINT)
         self.api.IsIconic.argtypes = (wintypes.HWND,)
+        self.api.IsZoomed.argtypes = (wintypes.HWND,)
+        self.api.ShowWindow.argtypes = (wintypes.HWND, ctypes.c_int)
 
     def monitors(self):
         result = []
@@ -76,8 +81,22 @@ class NativeDisplays:
         if self.api.IsIconic(hwnd):
             raise ValueError('Codex 窗口已最小化，请先手动还原窗口。')
         left, top, right, bottom = rect
-        if not self.api.SetWindowPos(hwnd, None, left, top, right-left, bottom-top, SWP_PASSIVE):
-            raise OSError(ctypes.get_last_error(), '窗口移动失败。')
+        zoomed = bool(self.api.IsZoomed(hwnd))
+        if zoomed:
+            # SetWindowPos on a maximized window only changes its restore
+            # rectangle; Windows keeps it maximized on the old monitor.
+            self.api.ShowWindow(hwnd, SW_RESTORE)
+        try:
+            if not self.api.SetWindowPos(hwnd, None, left, top, right-left, bottom-top, SWP_PASSIVE):
+                raise OSError(ctypes.get_last_error(), '窗口移动失败。')
+            current = wintypes.RECT()
+            if (self.api.GetWindowRect(hwnd, ctypes.byref(current)) and
+                    (current.left, current.top, current.right, current.bottom) != (left, top, right, bottom)):
+                if not self.api.SetWindowPos(hwnd, None, left, top, right-left, bottom-top, SWP_PASSIVE):
+                    raise OSError(ctypes.get_last_error(), '窗口移动失败。')
+        finally:
+            if zoomed:
+                self.api.ShowWindow(hwnd, SW_MAXIMIZE)
 
 
 def primary_monitor(monitors):

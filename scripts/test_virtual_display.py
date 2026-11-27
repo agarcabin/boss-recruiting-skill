@@ -67,6 +67,21 @@ class VirtualDisplayTests(unittest.TestCase):
             self.assertEqual([item["device"] for item in virtual_display.physical_monitors(monitors)],
                              [r"\\.\DISPLAY1"])
 
+    def test_best_mode_prefers_exact_primary_resolution(self):
+        def mode(width, height, frequency=60):
+            value = virtual_display.DEVMODEW()
+            value.dmPelsWidth, value.dmPelsHeight = width, height
+            value.dmDisplayFrequency = frequency
+            return value
+
+        with patch.object(virtual_display, "_devmode",
+                          side_effect=[mode(1920, 1080), mode(2560, 1600, 60),
+                                       mode(2560, 1600, 240), None]):
+            self.assertEqual(virtual_display._best_mode("x", 2560, 1600), (2560, 1600, 240))
+        with patch.object(virtual_display, "_devmode",
+                          side_effect=[mode(1920, 1080), mode(1920, 1200), None]):
+            self.assertEqual(virtual_display._best_mode("x", 2560, 1600), (1920, 1200, 60))
+
     def toggle(self, monitors, current, ensure_result=None):
         native = FakeNative(monitors, current)
         calls = {"ensure": 0, "after": 0}
