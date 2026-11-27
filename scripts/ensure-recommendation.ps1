@@ -3,6 +3,7 @@ Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 . (Join-Path $PSScriptRoot 'boss-browser-binding.ps1')
 $root=Get-BossBrowserRoot
+$null=Dismiss-BossLoginNotice
 $value=$null
 if(!$root.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern,[ref]$value)){throw 'boss_url_unavailable'}
 if($value.Current.Value -match '^https://www\.zhipin\.com/web/chat/recommend(?:[/?#]|$)'){
@@ -22,6 +23,7 @@ for($attempt=0;$attempt -lt 20;$attempt++){
  # Document loss cannot prove which tab replaced it. Keep the original
  # binding and require attention instead of binding a different BOSS tab.
  $root=Get-BossBrowserRoot
+ $null=Dismiss-BossLoginNotice
  $value=$null
  if($root.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern,[ref]$value) -and $value.Current.Value -match '^https://www\.zhipin\.com/web/chat/recommend(?:[/?#]|$)'){
   @{state='ready';navigated=$true}|ConvertTo-Json -Compress;exit

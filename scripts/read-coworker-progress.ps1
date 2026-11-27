@@ -28,6 +28,7 @@ function Emit-Observation([string]$State, [string]$Timestamp, [string]$Evidence,
 
 try {
     $root = (Get-BossBrowserRoot $WindowHandle)
+    $null = Dismiss-BossLoginNotice -Handle $WindowHandle
     $documentCondition = New-Object System.Windows.Automation.PropertyCondition(
         [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
         [System.Windows.Automation.ControlType]::Document)

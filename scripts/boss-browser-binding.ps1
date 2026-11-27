@@ -1,4 +1,6 @@
 # Shared, fail-closed boundary for BOSS UIA only. No browser/desktop fallback.
+. (Join-Path $PSScriptRoot 'boss-login-notice.ps1')
+
 function Get-BossBrowserRoot([long]$Handle=0,[switch]$AllowOffscreen) {
  if(!$env:BOSS_BROWSER_BINDING -or !(Test-Path -LiteralPath $env:BOSS_BROWSER_BINDING)){throw 'codex_iab_binding_required'}
  $b=Get-Content -LiteralPath $env:BOSS_BROWSER_BINDING -Raw -Encoding UTF8|ConvertFrom-Json

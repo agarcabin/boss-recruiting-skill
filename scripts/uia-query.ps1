@@ -29,6 +29,7 @@ Add-Type -AssemblyName UIAutomationTypes
 
 
 $root = (Get-BossBrowserRoot $WindowHandle)
+$null = Dismiss-BossLoginNotice -Handle $WindowHandle
 if ($null -eq $root) {
     throw "无法取得窗口 UI Automation 根节点。"
 }

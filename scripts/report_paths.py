@@ -38,6 +38,24 @@ def report_filename(profile: Path | str, filename: str | None = None) -> str:
     return base if base.startswith(prefix) else prefix + base
 
 
+def profile_short_label(profile: Path | str) -> str:
+    """Short label for archived file names: the job profile file name."""
+    path = Path(profile)
+    stem = path.stem.strip(' .')
+    try:
+        configs = workspace_paths.configs_dir().resolve()
+        parent = path.parent.resolve()
+        in_configs = parent != configs and parent.is_relative_to(configs)
+    except (OSError, ValueError):
+        in_configs = False
+    if in_configs and stem:
+        value = stem
+    else:
+        company, position = profile_identity(profile)
+        value = position or company
+    return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value).strip(' .')[:30]
+
+
 def report_path(root: Path, started_at: str, profile: Path | str) -> Path:
     day = datetime.fromisoformat(started_at).astimezone(CN_TZ)
     return workspace_paths.records_dir(root) / f"{day.month}月{day.day}日" / report_filename(profile)

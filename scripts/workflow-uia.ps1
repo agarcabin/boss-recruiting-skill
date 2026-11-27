@@ -15,6 +15,7 @@ if(!$WindowHandle){
 }
 
 $root=(Get-BossBrowserRoot $WindowHandle)
+$null=Dismiss-BossLoginNotice -Handle $WindowHandle
 $dc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Document)
 $docs=@()
 foreach($d in (Get-BossDocuments $root)){

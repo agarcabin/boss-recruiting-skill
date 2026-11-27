@@ -16,6 +16,7 @@ public class CardNative { [DllImport("user32.dll")] public static extern bool Se
 [void][CardNative]::SetProcessDPIAware()
 [void][CardNative]::SetThreadDpiAwarenessContext([IntPtr](-4))
 $root=(Get-BossBrowserRoot $WindowHandle)
+$null=Dismiss-BossLoginNotice -Handle $WindowHandle
 $docCondition=[System.Windows.Automation.AndCondition]::new(
  [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Document),
  [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,'BOSS直聘'))
@@ -73,6 +74,7 @@ $directory=[IO.Path]::GetFullPath($OutputDirectory);[IO.Directory]::CreateDirect
 if(!$NoImage){
  $bitmap=[Drawing.Bitmap]::new([int]$rect.Width,[int]$rect.Height);$graphics=[Drawing.Graphics]::FromImage($bitmap)
  $null=Get-BossBrowserRoot ([long]$WindowHandle)
+ $null=Dismiss-BossLoginNotice -Handle ([long]$WindowHandle)
  $geometry=@{left=[int]$rect.X;top=[int]$rect.Y;width=$bitmap.Width;height=$bitmap.Height}
  try {
   Assert-BossCaptureVisible $WindowHandle $geometry

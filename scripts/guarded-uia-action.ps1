@@ -15,6 +15,7 @@ Add-Type -AssemblyName UIAutomationTypes
 $t=Get-Content -LiteralPath $Target -Raw | ConvertFrom-Json
 if($Action -in @('Key','SendText')){Assert-BossForeground}
 $root=Get-BossBrowserRoot ([long]$t.hwnd)
+$null=Dismiss-BossLoginNotice -Handle ([long]$t.hwnd)
 $binding=Get-Content -LiteralPath $env:BOSS_BROWSER_BINDING -Raw -Encoding UTF8|ConvertFrom-Json
 if(!$t.browser_binding_id -or $t.browser_binding_id -ne $binding.binding_id){throw 'stale_boss_browser_target_rebind_required'}
 # RuntimeId is the UIA address to invoke, not a candidate identity/ancestor guard.

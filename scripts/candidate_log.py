@@ -31,7 +31,7 @@ import hit_summary
 import recruiting_rules
 import run_safety
 import resume_archive
-from report_paths import profile_identity, report_filename
+from report_paths import profile_identity, profile_short_label, report_filename
 
 
 try:
@@ -449,7 +449,8 @@ def record(db, args, payload=None):
         try:
             sent = db.execute('SELECT status FROM candidates WHERE run_id=? AND candidate_hash=?', (args.run,digest)).fetchone()
             resume_paths = archive_resume_files(args.output_root,payload["started_at"],str(payload["candidate_name"]).strip(),digest,scores["resume_evidence"],
-                                                resume_archive.category(result, sent['status'] if sent else 'assessed'))
+                                                resume_archive.category(result, sent['status'] if sent else 'assessed'),
+                                                job_label=profile_short_label(run["profile_path"]))
             payload["resume_evidence"] = dict(image=resume_paths[0],ocr_text=resume_paths[1],ocr_json=resume_paths[2])
         except (ValueError,OSError) as exc:
             warnings.append('简历归档待补：'+str(exc))
@@ -593,8 +594,8 @@ def archive(db, args):
         raise ValueError(f"pdf_unreadable: {exc}") from exc
     folder = daily_dir(args.output_root, row["started_at"])
     folder.mkdir(parents=True, exist_ok=True)
-    safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", row["candidate_name"]).strip(" .")[:40] or "候选人"
-    target = folder / f"{safe_name}-{digest[:10]}.pdf"
+    stem = archive_stem(row["candidate_name"], profile_short_label(run["profile_path"]))
+    target = folder / f"{stem}-{digest[:10]}.pdf"
     if target.exists():
         if hashlib.sha256(target.read_bytes()).digest() != hashlib.sha256(source.read_bytes()).digest():
             raise ValueError("archive_filename_collision")
@@ -616,6 +617,12 @@ def archive(db, args):
 
 def safe_candidate_name(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(" .")[:40] or "候选人"
+
+
+def archive_stem(candidate_name: str, job_label: str = "") -> str:
+    label = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(job_label or "")).strip(" .")[:30]
+    name = safe_candidate_name(candidate_name)
+    return label + "-" + name if label else name
 
 
 def copy_atomic(source: Path, target: Path) -> None:
@@ -640,6 +647,7 @@ def archive_resume_files(
     digest: str,
     evidence: dict,
     category: str = '未招呼简历',
+    job_label: str = '',
 ) -> tuple[str, str, str | None]:
     image = Path(str(evidence.get("image", "")))
     ocr_text = Path(str(evidence.get("ocr_text", "")))
@@ -666,10 +674,10 @@ def archive_resume_files(
     ocr_folder = folder / "简历OCR"
     image_folder.mkdir(parents=True, exist_ok=True)
     ocr_folder.mkdir(parents=True, exist_ok=True)
-    safe_name = safe_candidate_name(candidate_name)
-    target_image = image_folder / f"{safe_name}-{digest[:10]}.png"
-    target_text = ocr_folder / f"{safe_name}-{digest[:10]}.ocr.txt"
-    target_json = ocr_folder / f"{safe_name}-{digest[:10]}.ocr.json"
+    stem = archive_stem(candidate_name, job_label)
+    target_image = image_folder / f"{stem}-{digest[:10]}.png"
+    target_text = ocr_folder / f"{stem}-{digest[:10]}.ocr.txt"
+    target_json = ocr_folder / f"{stem}-{digest[:10]}.ocr.json"
     copy_atomic(image, target_image)
     copy_atomic(ocr_text, target_text)
     if ocr_json:
@@ -695,6 +703,7 @@ def archive_resume(db, args):
             "ocr_json": args.ocr_json,
         },
         resume_archive.category(json.loads(row['eligibility_json'] or '{}'), row['send_status']),
+        job_label=profile_short_label(run["profile_path"]),
     )
     db.execute("""UPDATE assessments SET resume_image_path=?,resume_ocr_text_path=?,
         resume_ocr_json_path=?,resume_archive_status='saved',resume_archive_note='',

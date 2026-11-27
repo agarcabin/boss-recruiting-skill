@@ -14,6 +14,18 @@ BOSS仍使用定向Win32 UIA和本地Win32截图。禁止CUA（包括只读绑�
 
 页面加载/Document异常允许等待、重查一次；需要时在焦点正确的BOSS文档使用Refresh，或明确非CUA入口重开一次。恢复后旧RuntimeId作废，重新定位、重读同事进度及内容。不因一次查询返回0强制停机，也不无限刷新。验证码、风控、登录失效或平台限制按保留规则处理。
 
+## 登录提示弹窗（“账号已经登录过了”）
+
+Chromium 把这个页签级弹窗渲染为宿主窗口下的独立 `RootView` 窗口，不属于 BOSS `Document` 子树。因此只对 BOSS 文档做 `FindAll` 找不到它，必须从宿主窗口句柄 `AutomationElement.FromHandle(hwnd)` 向下枚举 `ControlType=Window`，再按以下条件确认：
+
+- 窗口名称包含 `zhipin.com`。
+- 子树中存在 `ControlType=Text` 且文案包含“登录过”或“请勿重复登录”的正文。
+- 子树中存在唯一可见的 `ControlType=Button`，名称为“确定”“确认”或“OK”。
+
+确认后只派发一次：优先 `LegacyIAccessiblePattern`(10018) 的 `DoDefaultAction()`，没有默认动作时使用 `InvokePattern`(10000) 的 `Invoke()`。随后最多轮询 2 秒确认弹窗消失；未消失抛出 `boss_login_notice_dismiss_unconfirmed` 并停止本次操作。正文不匹配、按钮不唯一、按钮不可见或动作模式缺失都失败关闭，不猜测点击目标，也不使用坐标、CUA、DOM、CDP 或网页脚本。
+
+调用点：`bind-boss-browser.ps1`（绑定前）、`workflow-uia.ps1`（每次读页）、`guarded-uia-action.ps1`（每次页面动作）、`probe-boss-window.ps1`、`ensure-recommendation.ps1`（打开/切换后及 250ms 等待循环每轮）、`capture-card.ps1`、`resume_capture.ps1`、`read-coworker-progress.ps1`、`uia-query.ps1`。共享实现在 `scripts/boss-login-notice.ps1`，单测为 `scripts/test-boss-login-notice.ps1` 与 `scripts/test_boss_login_notice.py`。
+
 ## 本机实测页面层级与控件归属（2026-10-27）
 
 用户在 BOSS 页面留下的批注确认，同一视觉浮层中的控件分属不同 iframe，不能只按屏幕位置猜文档：

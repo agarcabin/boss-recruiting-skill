@@ -76,6 +76,7 @@ $script:CaptureResumeDocument = $null
 $script:StaticResumeSignature = $null
 function Find-ResumeDocument {
     $root = (Get-BossBrowserRoot $WindowHandle)
+    $null = Dismiss-BossLoginNotice -Handle $WindowHandle
     if ($null -eq $root) {
         return $null
     }
