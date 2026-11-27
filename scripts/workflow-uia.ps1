@@ -5,6 +5,10 @@ param(
 $OutputEncoding=[Text.UTF8Encoding]::new($false);[Console]::OutputEncoding=$OutputEncoding
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName UIAutomationClient;Add-Type -AssemblyName UIAutomationTypes
+if(!('BossUiaDpi' -as [type])){
+ Add-Type 'using System;using System.Runtime.InteropServices;public static class BossUiaDpi{[DllImport("user32.dll")]public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr v);}'
+}
+[void][BossUiaDpi]::SetThreadDpiAwarenessContext([IntPtr](-4))
 . (Join-Path $PSScriptRoot 'boss-browser-binding.ps1')
 . (Join-Path $PSScriptRoot 'coworker-tab-selection.ps1')
 . (Join-Path $PSScriptRoot 'filter-control.ps1')
@@ -261,7 +265,7 @@ if($Action -eq 'ResumePresence'){
    foreach($node in @($panel.FindAll([System.Windows.Automation.TreeScope]::Descendants,$tc))|Select-Object -First 120){if(!$node.Current.IsOffscreen){[void]$signal.Add(($node.GetRuntimeId() -join ','))}}
   }
  }
- @{state=$(if($resumeDocs.Count){'present'}else{'absent'});hwnd=$WindowHandle;view_signature=(@($signal) -join ';');document_target=$(if($resumeDocs.Count){Target $resumeDocs[0].element $resumeDocs[0].url}else{$null})}|ConvertTo-Json -Depth 6 -Compress;exit
+ @{state=$(if($resumeDocs.Count){'present'}else{'absent'});hwnd=$WindowHandle;view_signature=(@($signal) -join ';');document_target=$(if($resumeDocs.Count){Target $resumeDocs[-1].element $resumeDocs[-1].url}else{$null})}|ConvertTo-Json -Depth 6 -Compress;exit
 }
 if($Action -in @('Resume','ResumeFull')){
  $parts=@();$seen=[Collections.Generic.HashSet[string]]::new()
@@ -407,14 +411,22 @@ foreach($doc in $docs){
   foreach($node in $scope.FindAll([System.Windows.Automation.TreeScope]::Descendants,$nc)){if(!$node.Current.IsOffscreen -and $seen.Add(($node.GetRuntimeId() -join ','))){$hits+=@{target=(Target $node $doc.url)}}}
  }
  if($Action -eq 'Close'){
-  # Live BOSS resume X is an unnamed Group, not a button named 关闭.
-  $nc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ClassNameProperty,'close-btn')
-  foreach($node in $scope.FindAll([System.Windows.Automation.TreeScope]::Descendants,$nc)){
-   if($node.Current.IsOffscreen){continue}
-   $parent=[System.Windows.Automation.TreeWalker]::RawViewWalker.GetParent($node)
-   $invoke=$null
-   if($parent.Current.ClassName -match '\blib-standard-resume\b' -and $node.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern,[ref]$invoke) -and $seen.Add(($node.GetRuntimeId() -join ','))){$hits+=@{label='关闭';target=(Target $node $doc.url)}}
+  # The resume drawer X is an unnamed close-btn under boss-layer__lock-scroll.
+  # Several hidden resume panes can stay in the tree; the last one is the top.
+  $lastClose=$null
+  if(@($docs|Where-Object {$_.url -like '*c-resume*'}).Count){
+   $nc=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ClassNameProperty,'close-btn')
+   foreach($closeDoc in $docs){
+    foreach($node in $closeDoc.element.FindAll([System.Windows.Automation.TreeScope]::Descendants,$nc)){
+     if($node.Current.IsOffscreen){continue}
+     $parent=[System.Windows.Automation.TreeWalker]::RawViewWalker.GetParent($node)
+     if($parent.Current.ClassName -match 'boss-layer__lock-scroll|lib-standard-resume'){
+      $lastClose=@{label='关闭';target=(Target $node $closeDoc.url)}
+     }
+    }
+   }
   }
+  if($lastClose){$hits=@($lastClose)}
  }
 }
 if($hits.Count -eq 1){@{state='found';match=$hits[0]}|ConvertTo-Json -Depth 6 -Compress}else{@{state='unavailable';reason='current_control_not_unique';count=$hits.Count}|ConvertTo-Json -Compress}

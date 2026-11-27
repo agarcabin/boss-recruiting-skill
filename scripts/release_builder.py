@@ -207,7 +207,7 @@ def build(root,output,public_root,legacy_dir=None,include_user_projects=False,re
     for name in ('scripts','references','agents','docs'):
         for path in (root/name).rglob('*'):
             if not path.is_file() or path.suffix not in ('.py','.ps1','.md','.json','.yaml','.yml','.txt') or '__pycache__' in path.parts:continue
-            if path.name.startswith('test_') and path.name not in ('test_core_contract.py','test_release149.py','test_release1410.py','test_hr_job.py','test_local_startup.py','test_misjudgment_review.py','test_layout_startup.py','test_notice_wait.py','test_report_layout.py','test_stop_feedback.py','test_adaptive_timing.py','test_policy151.py','test_display_switch.py','test_display_native.ps1','test_overlay_native.py','test_startup_focus.py','test_background_launch.py','test_boss_login_notice.py','test_virtual_display.py'):continue
+            if path.name.startswith('test_') and path.name not in ('test_core_contract.py','test_release149.py','test_release1410.py','test_hr_job.py','test_local_startup.py','test_misjudgment_review.py','test_layout_startup.py','test_notice_wait.py','test_report_layout.py','test_stop_feedback.py','test_adaptive_timing.py','test_policy151.py','test_display_switch.py','test_display_native.ps1','test_overlay_native.py','test_startup_focus.py','test_background_launch.py','test_boss_login_notice.py','test_virtual_display.py','test_uia3_legacy.py'):continue
             if path.name in ('resume-extraction-test-results.md','resume-extraction-test-plan.md','uia-resume-diagnostic-report.md'):continue
             if name=='references' and path.name in ('recruiting-rules.json','project-vault.json','publisher-key.json'):continue
             relative=path.relative_to(root).as_posix()

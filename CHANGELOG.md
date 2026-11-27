@@ -1,3 +1,8 @@
+# 1.5.19-beta — 2026-11-27（本地测试版）
+
+- 打开/切换/关闭简历改用 UIA3 `LegacyIAccessiblePattern` 的 MSAA 默认动作，避免 Codex 内置浏览器下 oleacc MSAA 根不匹配后回退 UIA Invoke 抢焦点。
+- 新增内置 `comtypes` 与 `uia3_legacy_action.py`；实测动作前后鼠标坐标、前台窗口、焦点窗口和输入法状态均不变。
+
 # 1.5.18-beta — 2026-11-27（本地测试版）
 
 - 修复最大化 Codex 窗口无法移到另一块屏的问题：移动前先还原，移动并核验后恢复最大化。

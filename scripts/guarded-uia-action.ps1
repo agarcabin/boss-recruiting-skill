@@ -10,6 +10,10 @@ $OutputEncoding=[Text.UTF8Encoding]::new($false)
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+if(!('BossUiaDpi' -as [type])){
+ Add-Type 'using System;using System.Runtime.InteropServices;public static class BossUiaDpi{[DllImport("user32.dll")]public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr v);}'
+}
+[void][BossUiaDpi]::SetThreadDpiAwarenessContext([IntPtr](-4))
 . (Join-Path $PSScriptRoot 'boss-browser-binding.ps1')
 
 $t=Get-Content -LiteralPath $Target -Raw | ConvertFrom-Json
@@ -84,6 +88,26 @@ function Restore-BossForeground([long]$Previous){
 $previousForeground=[long][BossForegroundRestore]::GetForegroundWindow()
 $restored=$false
 $clickStartedAt=[DateTimeOffset]::Now.ToString('o')
+if($Action -eq 'Invoke'){
+ $uia3Classes=$element.Current.ClassName -split '\s+'
+ if(@($uia3Classes|Where-Object {$_ -in @('card-inner','turn-btn','close-btn','boss-popup__close')}).Count){
+  $uia3Python=Join-Path (Split-Path $PSScriptRoot -Parent) 'runtime\win-x64\python\python.exe'
+  $uia3Helper=Join-Path $PSScriptRoot 'uia3_legacy_action.py'
+  if((Test-Path -LiteralPath $uia3Python) -and (Test-Path -LiteralPath $uia3Helper)){
+   $uia3Output=$null
+   try{
+    $uia3Output=& $uia3Python $uia3Helper --hwnd ([long]$t.hwnd) --runtime-id ($element.GetRuntimeId() -join ',') 2>&1
+   }catch{$uia3Output=$null}
+   $uia3Receipt=$null
+   if($uia3Output){try{$uia3Receipt=(@($uia3Output)|Select-Object -Last 1)|ConvertFrom-Json}catch{$uia3Receipt=$null}}
+   if($uia3Receipt -and $uia3Receipt.state -eq 'dispatched'){
+    $restored=Restore-BossForeground $previousForeground
+    @{state='dispatched';transport='uia3_legacy';default_action=$uia3Receipt.default_action;verified_sent=$false;foreground_restored=$restored;clickStartedAt=$clickStartedAt;clickEndedAt=[DateTimeOffset]::Now.ToString('o')}|ConvertTo-Json -Compress
+    exit
+   }
+  }
+ }
+}
 if($Action -eq 'Probe'){}
 elseif($Action -eq 'Invoke'){
  $navigationClasses=$element.Current.ClassName -split '\s+'

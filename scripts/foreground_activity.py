@@ -59,6 +59,15 @@ def track(db, run_id, command):
     try:
         require_input_foreground()
         yield
+    except BaseException:
+        try:
+            import traceback
+            log=Path(os.environ.get('TEMP','.'))/'recruiting-foreground-error.log'
+            with log.open('a',encoding='utf-8') as stream:
+                stream.write(' '.join(map(str,command))+'\n'+traceback.format_exc()+'\n')
+        except OSError:
+            pass
+        raise
     finally:
         db.execute('DELETE FROM foreground_activity WHERE token=?',(token,))
 

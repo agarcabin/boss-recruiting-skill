@@ -8,6 +8,19 @@ BOSS仍使用定向Win32 UIA和本地Win32截图。禁止CUA（包括只读绑�
 
 浏览器 `Invoke` 的焦点行为由 Chromium 的 UIA provider 决定，不能假定后台调用不会切换焦点。所有后台 `Invoke/Scroll/Reveal` 先经过输入保护：BOSS 不在前台时，最近 3 秒有输入或可见输入法组合窗则等待；持续输入超过 20 秒则暂停。浏览器页面控件没有独立 HWND 时，不得用 `SendMessage`/`PostMessage` 冒充页面点击。
 
+## Codex 内置浏览器的 UIA3 默认动作
+
+Codex 内置浏览器里，BOSS 网页没有独立渲染 HWND；直接 `AccessibleObjectFromWindow` 得到的 MSAA 根是 Codex 外壳，按 UIA 矩形匹配 MSAA 节点会失败（`msaa_navigation_target_not_unique:0`），随后回退 `InvokePattern`，可能让 Chromium 抢焦点或改变输入法状态。
+
+因此打开简历、下一位、关闭简历、关闭相关推荐改为：
+
+1. 用 UIA 定位目标控件并取得 RuntimeId；
+2. 在同一个 UIA 元素上取 UIA3 `LegacyIAccessiblePattern`（pattern id `10018`）；
+3. 有 `CurrentDefaultAction` 时只调用一次 `DoDefaultAction()`，回执 `transport:"uia3_legacy"`；
+4. 没有默认动作或元素不可用时，才回退到原有 oleacc MSAA / UIA Invoke。
+
+helper 为 `scripts/uia3_legacy_action.py`，依赖已内置在 `scripts/_vendor/comtypes`。实测打开简历时鼠标坐标、前台窗口、焦点窗口和输入法状态均不变化。
+
 目标RuntimeId用于寻址，不再核对候选人姓名、候选人祖先、活跃账本键、名称/类名、generation、deadline或一次性凭据。窗口/控件不存在时工具返回实际错误，重新定位，不盲点。
 
 卡片has-viewed可读时用于选择未查看起点；状态节点缺失或冲突时记未知，继续读取当前卡片，不要求人工确认。
